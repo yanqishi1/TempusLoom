@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>TempusLoom - 系统架构</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .diagram { border: 1px solid #ccc; padding: 20px; margin-bottom: 20px; }
+        .box { border: 2px solid #333; padding: 10px; margin: 5px; border-radius: 5px; display: inline-block; }
+        .module { background-color: #e6f2ff; }
+        .core { background-color: #ffe6e6; }
+        .plugin { background-color: #e6ffe6; }
+        .arrow { margin: 0 10px; font-weight: bold; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .description { margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <h1>TempusLoom 系统架构</h1>
+    
+    <div class="diagram">
+        <div style="text-align: center;">
+            <div class="box core" style="font-weight: bold;">核心引擎</div>
+            <div style="display: flex; justify-content: center; margin-top: 20px;">
+                <div class="box module">图像处理引擎</div>
+                <div class="arrow">↔</div>
+                <div class="box module">文件管理系统</div>
+                <div class="arrow">↔</div>
+                <div class="box module">元数据处理器</div>
+            </div>
+            <div style="display: flex; justify-content: center; margin-top: 20px;">
+                <div class="box module">历史记录管理</div>
+                <div class="arrow">↔</div>
+                <div class="box module">用户界面控制器</div>
+                <div class="arrow">↔</div>
+                <div class="box module">预设管理器</div>
+            </div>
+            <div style="display: flex; justify-content: center; margin-top: 20px;">
+                <div class="box plugin">插件系统</div>
+                <div class="arrow">↔</div>
+                <div class="box plugin">AI模块接口</div>
+                <div class="arrow">↔</div>
+                <div class="box plugin">扩展管理器</div>
+            </div>
+        </div>
+        
+        <div class="description">
+            <h3>架构说明:</h3>
+            <ul>
+                <li><strong>核心引擎</strong>: 协调所有模块，包含图像处理核心算法</li>
+                <li><strong>图像处理引擎</strong>: 负责所有基础和高级图像编辑功能</li>
+                <li><strong>文件管理系统</strong>: 处理图像文件导入、导出、管理和目录结构</li>
+                <li><strong>元数据处理器</strong>: 读取、修改和写入图像元数据</li>
+                <li><strong>历史记录管理</strong>: 处理编辑历史、版本控制和撤销/重做功能</li>
+                <li><strong>用户界面控制器</strong>: 管理所有UI组件和用户交互</li>
+                <li><strong>预设管理器</strong>: 处理预设创建、应用和共享</li>
+                <li><strong>插件系统</strong>: 支持第三方插件集成</li>
+                <li><strong>AI模块接口</strong>: 提供与AI工具集成的标准化接口</li>
+                <li><strong>扩展管理器</strong>: 管理插件生命周期和资源访问</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html> 

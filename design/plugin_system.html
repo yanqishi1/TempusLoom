@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>TempusLoom - 插件系统设计</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .diagram { border: 1px solid #ccc; padding: 20px; margin-bottom: 30px; }
+        .box { border: 2px solid #333; padding: 10px; margin: 5px; border-radius: 5px; display: inline-block; text-align: center; }
+        .module { background-color: #e6f2ff; }
+        .plugin { background-color: #e6ffe6; }
+        .api { background-color: #fff0e6; }
+        .arrow { margin: 0 10px; font-weight: bold; }
+        .code-sample { background-color: #f5f5f5; padding: 10px; border: 1px solid #ccc; font-family: monospace; margin: 10px 0; border-radius: 5px; }
+        .description { margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <h1>TempusLoom 插件系统设计</h1>
+    
+    <div class="diagram">
+        <h2>插件架构</h2>
+        <div style="text-align: center; margin-bottom: 20px;">
+            <div class="box module" style="width: 200px;">TempusLoom 核心应用</div>
+            <div style="margin: 20px 0;">
+                <div class="box api" style="width: 500px;">插件API接口层</div>
+            </div>
+            <div style="display: flex; justify-content: center; margin-top: 20px;">
+                <div class="box plugin">图像处理<br>插件</div>
+                <div class="arrow">←→</div>
+                <div class="box plugin">UI扩展<br>插件</div>
+                <div class="arrow">←→</div>
+                <div class="box plugin">AI工具<br>插件</div>
+                <div class="arrow">←→</div>
+                <div class="box plugin">导入/导出<br>插件</div>
+                <div class="arrow">←→</div>
+                <div class="box plugin">自定义<br>工作流插件</div>
+            </div>
+        </div>
+        
+        <div class="description">
+            <h3>插件架构说明:</h3>
+            <ul>
+                <li><strong>核心应用</strong>: TempusLoom的主要功能和界面</li>
+                <li><strong>插件API接口层</strong>: 提供标准化接口，允许插件与核心应用交互，访问图像数据、UI元素和应用功能</li>
+                <li><strong>图像处理插件</strong>: 提供额外的滤镜、调整和特效</li>
+                <li><strong>UI扩展插件</strong>: 允许自定义界面元素和工作区布局</li>
+                <li><strong>AI工具插件</strong>: 集成各种AI增强功能，如智能修复、物体识别和自动调整</li>
+                <li><strong>导入/导出插件</strong>: 支持额外的文件格式和云服务集成</li>
+                <li><strong>自定义工作流插件</strong>: 允许创建专业工作流和自动化批处理</li>
+            </ul>
+        </div>
+    </div>
+    
+    <div class="diagram">
+        <h2>插件开发接口</h2>
+        
+        <div style="margin-bottom: 20px;">
+            <h3>插件基础结构</h3>
+            <div class="code-sample">
+                <pre>
+# plugin_manifest.json
+{
+    "name": "高级图像增强",
+    "version": "1.0.0",
+    "author": "开发者名称",
+    "description": "提供高级图像增强和特效功能",
+    "min_app_version": "1.0.0",
+    "entry_point": "main.py",
+    "type": "image_processing",
+    "permissions": ["read_image", "write_image", "ui_panel"]
+}
+
+# main.py
+from tempusloom.plugin import Plugin
+from tempusloom.image import ImageProcessor
+from tempusloom.ui import UIPanel
+
+class AdvancedEnhancementPlugin(Plugin):
+    def __init__(self):
+        super().__init__()
+        
+    def initialize(self):
+        # 注册插件功能
+        self.register_filter("高级清晰度", self.advanced_sharpness)
+        self.register_filter("自适应对比度", self.adaptive_contrast)
+        
+        # 创建自定义UI面板
+        self.panel = UIPanel("高级增强")
+        self.panel.add_slider("强度", 0, 100, 50)
+        self.panel.add_checkbox("保留细节", True)
+        self.panel.add_button("应用", self.apply_enhancement)
+        
+        # 注册UI面板
+        self.register_panel(self.panel)
+        
+    def advanced_sharpness(self, image, params):
+        # 图像处理逻辑
+        return processed_image
+        
+    def adaptive_contrast(self, image, params):
+        # 图像处理逻辑
+        return processed_image
+        
+    def apply_enhancement(self):
+        # 从UI面板获取参数并应用到当前图像
+        intensity = self.panel.get_value("强度")
+        preserve_details = self.panel.get_value("保留细节")
+        current_image = self.get_current_image()
+        
+        # 处理图像
+        result = self.process_image(current_image, intensity, preserve_details)
+        
+        # 更新图像
+        self.update_image(result)
+</pre>
+            </div>
+        </div>
+        
+        <div style="margin-bottom: 20px;">
+            <h3>AI插件示例</h3>
+            <div class="code-sample">
+                <pre>
+# ai_plugin.py
+from tempusloom.plugin import Plugin
+from tempusloom.ai import AIModel
+import numpy as np
+
+class SmartEnhanceAI(Plugin):
+    def __init__(self):
+        super().__init__()
+        self.model = None
+        
+    def initialize(self):
+        # 加载AI模型
+        self.model = AIModel.load("smart_enhance_model.h5")
+        
+        # 注册AI功能
+        self.register_ai_tool("智能增强", self.smart_enhance)
+        self.register_ai_tool("主体识别", self.subject_detection)
+        
+        # 创建UI
+        self.panel = self.create_panel("AI增强工具")
+        self.panel.add_dropdown("增强模式", ["自然", "戏剧性", "柔和"])
+        self.panel.add_button("应用", self.apply_ai)
+        
+    def smart_enhance(self, image):
+        # 预处理图像
+        input_data = self.preprocess(image)
+        
+        # 运行AI模型
+        output_data = self.model.predict(input_data)
+        
+        # 后处理结果
+        enhanced_image = self.postprocess(output_data)
+        
+        return enhanced_image
+    
+    def subject_detection(self, image):
+        # AI主体检测实现
+        return mask, confidence
+        
+    def apply_ai(self):
+        # 获取UI参数并应用AI处理
+        mode = self.panel.get_value("增强模式")
+        image = self.get_current_image()
+        
+        # 根据模式调整AI处理参数
+        result = self.smart_enhance(image, mode=mode)
+        
+        # 更新图像
+        self.update_image(result)
+</pre>
+            </div>
+        </div>
+        
+        <div class="description">
+            <h3>插件开发接口说明:</h3>
+            <ul>
+                <li><strong>插件清单</strong>: 每个插件必须包含一个manifest文件，描述插件的基本信息、版本要求和权限</li>
+                <li><strong>插件类型</strong>: 支持多种插件类型，包括图像处理、UI扩展、AI工具、导入/导出和工作流</li>
+                <li><strong>权限系统</strong>: 明确定义插件可以访问的资源和功能</li>
+                <li><strong>API接口</strong>: 提供丰富的API接口，包括图像处理、UI创建、事件处理和数据访问</li>
+                <li><strong>生命周期管理</strong>: 管理插件的初始化、激活、停用和更新</li>
+                <li><strong>AI集成</strong>: 专门的AI接口，支持模型加载、推理和与图像处理的集成</li>
+            </ul>
+        </div>
+    </div>
+    
+    <div class="diagram">
+        <h2>插件管理器界面</h2>
+        <div style="border: 2px solid #333; padding: 10px; border-radius: 5px;">
+            <div style="background-color: #f0f0f0; padding: 5px; border-bottom: 1px solid #ccc; font-weight: bold;">插件管理器</div>
+            <div style="display: flex; margin-top: 10px;">
+                <div style="width: 200px; border-right: 1px solid #ccc; padding-right: 10px;">
+                    <div style="font-weight: bold; margin-bottom: 10px;">分类</div>
+                    <div style="padding: 5px; background-color: #e6f2ff; margin-bottom: 5px; border-radius: 3px;">全部插件</div>
+                    <div style="padding: 5px; margin-bottom: 5px;">图像处理</div>
+                    <div style="padding: 5px; margin-bottom: 5px;">UI扩展</div>
+                    <div style="padding: 5px; margin-bottom: 5px;">AI工具</div>
+                    <div style="padding: 5px; margin-bottom: 5px;">导入/导出</div>
+                    <div style="padding: 5px; margin-bottom: 5px;">工作流</div>
+                </div>
+                <div style="flex-grow: 1; padding: 0 10px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                        <input type="text" placeholder="搜索插件..." style="width: 200px; padding: 5px;">
+                        <div>
+                            <button style="padding: 5px 10px;">安装新插件</button>
+                            <button style="padding: 5px 10px;">更新全部</button>
+                        </div>
+                    </div>
+                    <table style="width: 100%; border-collapse: collapse;">
+                        <tr style="background-color: #f5f5f5;">
+                            <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd;">插件名称</th>
+                            <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd;">版本</th>
+                            <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd;">作者</th>
+                            <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd;">类型</th>
+                            <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd;">状态</th>
+                            <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd;">操作</th>
+                        </tr>
+                        <tr>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">高级图像增强</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">1.0.0</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">开发者名称</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">图像处理</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd; color: green;">已启用</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">
+                                <button style="padding: 2px 5px;">禁用</button>
+                                <button style="padding: 2px 5px;">设置</button>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">智能AI增强</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">2.1.3</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">AI工具团队</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">AI工具</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd; color: green;">已启用</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">
+                                <button style="padding: 2px 5px;">禁用</button>
+                                <button style="padding: 2px 5px;">设置</button>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">社交媒体导出</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">1.2.0</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">SocialTools</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">导入/导出</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd; color: red;">已禁用</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">
+                                <button style="padding: 2px 5px;">启用</button>
+                                <button style="padding: 2px 5px;">设置</button>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">暗房工作流</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">0.9.5</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">摄影工作室</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">工作流</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd; color: green;">已启用</td>
+                            <td style="padding: 8px; border-bottom: 1px solid #ddd;">
+                                <button style="padding: 2px 5px;">禁用</button>
+                                <button style="padding: 2px 5px;">设置</button>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+        </div>
+        
+        <div class="description">
+            <h3>插件管理器说明:</h3>
+            <ul>
+                <li><strong>分类浏览</strong>: 按类型浏览和筛选插件</li>
+                <li><strong>搜索功能</strong>: 快速查找特定插件</li>
+                <li><strong>管理功能</strong>: 安装、更新、启用、禁用和配置插件</li>
+                <li><strong>状态显示</strong>: 显示插件的当前状态和版本信息</li>
+                <li><strong>设置访问</strong>: 快速访问各插件的配置选项</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html> 

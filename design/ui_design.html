@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>TempusLoom - 用户界面设计</title>
+    <style>
+        :root {
+            --primary: #4361ee;
+            --primary-light: #4895ef;
+            --primary-dark: #3a0ca3;
+            --secondary: #4cc9f0;
+            --accent: #f72585;
+            --dark: #151526;
+            --dark-medium: #1f1f3a;
+            --dark-light: #292952;
+            --light: #f8f9fa;
+            --gray-100: #f3f4f6;
+            --gray-200: #e5e7eb;
+            --gray-300: #d1d5db;
+            --gray-400: #9ca3af;
+            --gray-500: #6b7280;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --error: #ef4444;
+        }
+        
+        body { 
+            font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif; 
+            margin: 0; 
+            padding: 20px;
+            color: #333;
+            background-color: var(--light);
+            line-height: 1.6;
+        }
+        h1, h2, h3 { 
+            font-weight: 600;
+            color: var(--dark);
+            letter-spacing: -0.02em;
+        }
+        h1 { 
+            font-size: 2.4em; 
+            border-bottom: 1px solid var(--gray-200);
+            padding-bottom: 15px;
+            margin-bottom: 25px;
+        }
+        h2 { 
+            font-size: 1.8em; 
+            margin-top: 30px;
+        }
+        .diagram { 
+            border-radius: 12px;
+            padding: 30px; 
+            margin-bottom: 50px; 
+            background-color: white;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.03), 0 6px 10px rgba(0,0,0,0.02);
+        }
+        .ui-container { 
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 12px 36px rgba(0,0,0,0.1);
+            border: 1px solid var(--gray-200);
+        }
+        .menu-bar { 
+            background: linear-gradient(to right, var(--dark), var(--dark-medium)); 
+            padding: 10px 20px; 
+            margin-bottom: 0; 
+            color: white;
+            font-size: 0.9em;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+        }
+        .menu-bar-logo {
+            font-weight: 700;
+            margin-right: 25px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .menu-bar-logo::before {
+            content: "";
+            display: inline-block;
+            width: 18px;
+            height: 18px;
+            background: linear-gradient(135deg, var(--accent), var(--primary));
+            border-radius: 4px;
+        }
+        .menu-bar-item {
+            padding: 6px 12px;
+            border-radius: 4px;
+            margin-right: 2px;
+            transition: all 0.15s;
+            cursor: pointer;
+        }
+        .menu-bar-item:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+        .menu-bar-item.active {
+            background-color: rgba(255, 255, 255, 0.15);
+        }
+        .content { 
+            display: flex; 
+            height: 580px; 
+        }
+        .sidebar { 
+            width: 240px; 
+            background-color: #f9fafb; 
+            padding: 18px; 
+            border-right: 1px solid var(--gray-200);
+            font-size: 0.9em;
+            overflow-y: auto;
+        }
+        .main-content { 
+            flex-grow: 1; 
+            display: flex; 
+            flex-direction: column; 
+        }
+        .toolbar { 
+            background: linear-gradient(to right, var(--dark-medium), var(--dark-light)); 
+            padding: 10px 16px; 
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .image-area { 
+            flex-grow: 1; 
+            background-color: var(--dark); 
+            background-image: 
+                linear-gradient(45deg, rgba(30, 30, 50, 0.5) 25%, transparent 25%),
+                linear-gradient(-45deg, rgba(30, 30, 50, 0.5) 25%, transparent 25%),
+                linear-gradient(45deg, transparent 75%, rgba(30, 30, 50, 0.5) 75%),
+                linear-gradient(-45deg, transparent 75%, rgba(30, 30, 50, 0.5) 75%);
+            background-size: 20px 20px;
+            background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            position: relative;
+        }
+        .properties { 
+            width: 300px; 
+            background-color: #f9fafb; 
+            padding: 18px; 
+            border-left: 1px solid var(--gray-200);
+            overflow-y: auto;
+        }
+        .status-bar { 
+            background-color: var(--dark); 
+            padding: 8px 20px; 
+            color: var(--gray-400);
+            font-size: 0.8em;
+            display: flex;
+            justify-content: space-between;
+        }
+        .module-item { 
+            margin: 6px 0; 
+            padding: 10px 12px; 
+            background-color: white; 
+            border: 1px solid var(--gray-200);
+            border-radius: 6px;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+            transition: all 0.2s;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .module-item::before {
+            content: "";
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            background-color: var(--gray-300);
+            border-radius: 3px;
+        }
+        .module-item:hover {
+            border-color: var(--primary-light);
+            box-shadow: 0 2px 5px rgba(67, 97, 238, 0.08);
+            transform: translateY(-1px);
+        }
+        .module-item.active {
+            background-color: rgba(67, 97, 238, 0.05);
+            border-color: var(--primary);
+            color: var(--primary);
+        }
+        .module-item.active::before {
+            background-color: var(--primary);
+        }
+        .tool-button { 
+            display: inline-flex; 
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 8px 14px; 
+            background-color: rgba(255,255,255,0.08); 
+            border-radius: 6px;
+            color: white;
+            transition: all 0.15s;
+            cursor: pointer;
+            font-weight: 500;
+            font-size: 0.9em;
+        }
+        .tool-button:hover {
+            background-color: rgba(255,255,255,0.15);
+        }
+        .tool-button.active {
+            background-color: var(--primary);
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        }
+        .property-group { 
+            margin-bottom: 18px; 
+            border: 1px solid var(--gray-200); 
+            border-radius: 8px;
+            padding: 16px; 
+            background-color: white; 
+            box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+            transition: all 0.2s;
+        }
+        .property-group:hover {
+            box-shadow: 0 4px 8px rgba(0,0,0,0.04);
+        }
+        .property-group strong {
+            display: block;
+            margin-bottom: 12px;
+            color: var(--dark);
+            font-size: 0.95em;
+            font-weight: 600;
+        }
+        .slider-control {
+            margin: 12px 0;
+        }
+        .slider-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.85em;
+            color: var(--gray-500);
+            margin-bottom: 6px;
+        }
+        .slider-value {
+            font-weight: 600;
+            color: var(--dark);
+            background-color: var(--gray-100);
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+        .slider-track {
+            height: 4px;
+            background-color: var(--gray-200);
+            border-radius: 2px;
+            position: relative;
+            margin: 8px 0;
+        }
+        .slider-fill {
+            position: absolute;
+            height: 100%;
+            background: linear-gradient(to right, var(--primary-light), var(--primary));
+            border-radius: 2px;
+        }
+        .slider-handle {
+            width: 14px;
+            height: 14px;
+            background-color: white;
+            border: 2px solid var(--primary);
+            border-radius: 50%;
+            position: absolute;
+            top: -7px;
+            margin-left: -7px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+            transition: all 0.15s;
+        }
+        .slider-handle:hover {
+            transform: scale(1.1);
+            box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+        }
+        .image-preview { 
+            width: 75%; 
+            height: 75%; 
+            background-color: #222236; 
+            border: 1px solid #333348; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+            color: var(--gray-400);
+            position: relative;
+            overflow: hidden;
+            border-radius: 4px;
+        }
+        .image-preview::before {
+            content: "";
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            background-image: 
+                linear-gradient(45deg, #222236 25%, transparent 25%),
+                linear-gradient(-45deg, #222236 25%, transparent 25%),
+                linear-gradient(45deg, transparent 75%, #222236 75%),
+                linear-gradient(-45deg, transparent 75%, #222236 75%);
+            background-size: 20px 20px;
+            background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+            opacity: 0.3;
+        }
+        .description { 
+            margin-top: 25px; 
+            background-color: var(--gray-100);
+            padding: 18px;
+            border-radius: 8px;
+            border-left: 4px solid var(--primary);
+        }
+        .ai-tools {
+            background: linear-gradient(to bottom right, rgba(247, 37, 133, 0.03), rgba(67, 97, 238, 0.03));
+            border: 1px solid rgba(247, 37, 133, 0.1);
+        }
+        .ai-button {
+            padding: 10px;
+            border: none;
+            background: linear-gradient(135deg, var(--accent), var(--primary-dark));
+            color: white;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s;
+            box-shadow: 0 2px 5px rgba(247, 37, 133, 0.2);
+        }
+        .ai-button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 8px rgba(247, 37, 133, 0.3);
+        }
+        .section-title {
+            font-weight: 600;
+            margin: 20px 0 12px 0;
+            color: var(--dark);
+            font-size: 0.95em;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .section-title::before {
+            content: "";
+            display: inline-block;
+            width: 3px;
+            height: 14px;
+            background: linear-gradient(to bottom, var(--primary), var(--primary-light));
+            border-radius: 3px;
+        }
+        .gallery-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+            gap: 15px;
+            padding: 20px;
+            background-color: var(--dark);
+            overflow-y: auto;
+        }
+        .gallery-item {
+            background-color: #222236;
+            aspect-ratio: 3/2;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 3px 8px rgba(0,0,0,0.2);
+            transition: all 0.2s;
+            cursor: pointer;
+            position: relative;
+        }
+        .gallery-item:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 12px rgba(0,0,0,0.3);
+        }
+        .gallery-item.selected {
+            box-shadow: 0 0 0 2px var(--primary), 0 6px 12px rgba(0,0,0,0.3);
+        }
+        .filter-bar {
+            display: flex;
+            align-items: center;
+            padding: 10px 20px;
+            background: linear-gradient(to right, var(--dark), var(--dark-medium));
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .search-box {
+            flex: 1;
+            max-width: 320px;
+            position: relative;
+            margin-right: 15px;
+        }
+        .search-input {
+            width: 100%;
+            padding: 9px 15px 9px 38px;
+            background-color: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+            color: white;
+            font-size: 0.9em;
+            transition: all 0.2s;
+        }
+        .search-input:focus {
+            background-color: rgba(255, 255, 255, 0.12);
+            border-color: rgba(255, 255, 255, 0.1);
+            outline: none;
+        }
+        .search-input::placeholder {
+            color: rgba(255, 255, 255, 0.4);
+        }
+        .search-icon {
+            position: absolute;
+            left: 14px;
+            top: 10px;
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 0.9em;
+        }
+        .filter-button {
+            padding: 8px 16px;
+            background-color: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+            color: white;
+            margin-right: 10px;
+            font-size: 0.9em;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .filter-button:hover {
+            background-color: rgba(255, 255, 255, 0.12);
+        }
+        .filter-button.active {
+            background-color: var(--primary);
+        }
+        .history-item {
+            padding: 6px 0;
+            color: var(--gray-500);
+            transition: all 0.15s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border-radius: 4px;
+            padding-left: 4px;
+        }
+        .history-item:hover {
+            background-color: var(--gray-100);
+            color: var(--dark);
+        }
+        .history-item.active {
+            border-left: 2px solid var(--primary);
+            padding-left: 8px;
+            color: var(--primary);
+        }
+        .box-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        /* Layers Panel Styles */
+        .layers-panel {
+            background-color: var(--dark-medium);
+            border-top: 1px solid rgba(255, 255, 255, 0.05);
+            height: 180px;
+            overflow-y: auto;
+            color: white;
+        }
+        .layers-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            background-color: var(--dark);
+        }
+        .layers-title {
+            font-weight: 500;
+            font-size: 0.9em;
+        }
+        .layers-actions {
+            display: flex;
+            gap: 6px;
+        }
+        .layer-action-button {
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: rgba(255, 255, 255, 0.08);
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.15s;
+            font-size: 14px;
+        }
+        .layer-action-button:hover {
+            background-color: rgba(255, 255, 255, 0.15);
+        }
+        .layer-item {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            transition: all 0.15s;
+            cursor: pointer;
+        }
+        .layer-item:hover {
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+        .layer-item.active {
+            background-color: rgba(67, 97, 238, 0.15);
+        }
+        .layer-visibility {
+            margin-right: 8px;
+            font-size: 14px;
+            opacity: 0.7;
+        }
+        .layer-thumbnail {
+            width: 32px;
+            height: 24px;
+            background-color: rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            margin-right: 8px;
+            border-radius: 2px;
+        }
+        .layer-name {
+            flex: 1;
+            font-size: 0.9em;
+        }
+        .layer-type {
+            font-size: 0.8em;
+            color: var(--gray-400);
+            margin-left: 8px;
+            padding: 2px 6px;
+            background-color: rgba(0, 0, 0, 0.2);
+            border-radius: 3px;
+        }
+        /* Mask Styles */
+        .mask-controls {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            background-color: rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+            margin-bottom: 12px;
+        }
+        .mask-preview {
+            width: 32px;
+            height: 32px;
+            background-color: rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            margin-right: 10px;
+            border-radius: 4px;
+            position: relative;
+            overflow: hidden;
+        }
+        .mask-preview::before {
+            content: "";
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            background-image: 
+                linear-gradient(45deg, #555 25%, transparent 25%),
+                linear-gradient(-45deg, #555 25%, transparent 25%),
+                linear-gradient(45deg, transparent 75%, #555 75%),
+                linear-gradient(-45deg, transparent 75%, #555 75%);
+            background-size: 8px 8px;
+            opacity: 0.3;
+        }
+        .mask-options {
+            flex: 1;
+        }
+        .mask-mode-selector {
+            display: flex;
+            margin-bottom: 6px;
+        }
+        .mask-mode {
+            padding: 3px 8px;
+            font-size: 0.8em;
+            background-color: rgba(0, 0, 0, 0.3);
+            border-radius: 3px;
+            margin-right: 4px;
+            cursor: pointer;
+        }
+        .mask-mode.active {
+            background-color: var(--primary);
+        }
+        .mask-opacity {
+            display: flex;
+            align-items: center;
+            font-size: 0.8em;
+        }
+        .mask-opacity-slider {
+            flex: 1;
+            height: 4px;
+            background-color: rgba(255, 255, 255, 0.1);
+            border-radius: 2px;
+            margin: 0 8px;
+            position: relative;
+        }
+        .mask-opacity-fill {
+            position: absolute;
+            height: 100%;
+            width: 75%;
+            background-color: var(--primary);
+            border-radius: 2px;
+        }
+        .mask-opacity-handle {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            background-color: white;
+            border-radius: 50%;
+            top: -3px;
+            left: 75%;
+            margin-left: -5px;
+        }
+        .blend-mode-selector {
+            display: flex;
+            align-items: center;
+            margin-top: 8px;
+            font-size: 0.85em;
+        }
+        .blend-mode-label {
+            margin-right: 8px;
+            color: var(--gray-400);
+        }
+        .blend-mode-select {
+            flex: 1;
+            background-color: rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        .layer-group {
+            margin-left: 20px;
+            position: relative;
+        }
+        .layer-group::before {
+            content: "";
+            position: absolute;
+            left: -12px;
+            top: 0;
+            height: 100%;
+            width: 1px;
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+    </style>
+</head>
+<body>
+    <h1>TempusLoom 用户界面设计</h1>
+    
+    <div class="diagram">
+        <h2>主界面布局</h2>
+        
+        <div class="ui-container">
+            <div class="menu-bar">
+                <div class="menu-bar-logo">TempusLoom</div>
+                <div class="menu-bar-item active">文件</div>
+                <div class="menu-bar-item">编辑</div>
+                <div class="menu-bar-item">视图</div>
+                <div class="menu-bar-item">工具</div>
+                <div class="menu-bar-item">调整</div>
+                <div class="menu-bar-item">滤镜</div>
+                <div class="menu-bar-item">AI工具</div>
+                <div class="menu-bar-item">插件</div>
+                <div class="menu-bar-item">帮助</div>
+            </div>
+            <div class="content">
+                <div class="sidebar">
+                    <div class="section-title">图库浏览</div>
+                    <div class="module-item active">收藏夹</div>
+                    <div class="module-item">最近文件</div>
+                    <div class="module-item">文件夹结构</div>
+                    <div class="module-item">智能收藏</div>
+                    <div class="module-item">标签管理</div>
+                    
+                    <div class="section-title">导入/导出</div>
+                    <div class="module-item">导入工具</div>
+                    <div class="module-item">批量导出</div>
+                    
+                    <div class="section-title">AI助手</div>
+                    <div class="module-item">智能增强</div>
+                    <div class="module-item">AI辅助编辑</div>
+                </div>
+                
+                <div class="main-content">
+                    <div class="toolbar">
+                        <div class="tool-button active">选择</div>
+                        <div class="tool-button">裁剪</div>
+                        <div class="tool-button">画笔</div>
+                        <div class="tool-button">渐变</div>
+                        <div class="tool-button">橡皮擦</div>
+                        <div class="tool-button">文字</div>
+                        <div class="tool-button">克隆工具</div>
+                        <div class="tool-button">修复工具</div>
+                        <div class="tool-button">切换视图</div>
+                        <div style="margin-left: auto;"></div>
+                        <div class="tool-button">创建蒙版</div>
+                        <div class="tool-button">调整图层</div>
+                    </div>
+                    
+                    <div class="image-area">
+                        <div class="image-preview">图像预览区域</div>
+                    </div>
+                    
+                    <div class="layers-panel">
+                        <div class="layers-header">
+                            <div class="layers-title">图层</div>
+                            <div class="layers-actions">
+                                <div class="layer-action-button" title="新建图层">+</div>
+                                <div class="layer-action-button" title="新建图层组">⊞</div>
+                                <div class="layer-action-button" title="删除图层">−</div>
+                                <div class="layer-action-button" title="图层效果">⨁</div>
+                                <div class="layer-action-button" title="图层属性">⚙</div>
+                            </div>
+                        </div>
+                        <div class="layer-item active">
+                            <div class="layer-visibility">👁</div>
+                            <div class="layer-thumbnail"></div>
+                            <div class="layer-name">调整图层</div>
+                            <div class="layer-type">调整</div>
+                        </div>
+                        <div class="layer-item">
+                            <div class="layer-visibility">👁</div>
+                            <div class="layer-thumbnail"></div>
+                            <div class="layer-name">文字图层</div>
+                            <div class="layer-type">文字</div>
+                        </div>
+                        <div class="layer-item">
+                            <div class="layer-visibility">👁</div>
+                            <div class="layer-thumbnail"></div>
+                            <div class="layer-name">蒙版图层</div>
+                            <div class="layer-type">蒙版</div>
+                        </div>
+                        <div class="layer-item">
+                            <div class="layer-visibility">👁</div>
+                            <div class="layer-thumbnail"></div>
+                            <div class="layer-name">背景图层</div>
+                            <div class="layer-type">图像</div>
+                        </div>
+                    </div>
+                    
+                    <div class="status-bar">
+                        <div>图像信息: 2048×1536px | RGB | 300dpi | 24位</div>
+                        <div>缩放: 75%</div>
+                    </div>
+                </div>
+                
+                <div class="properties">
+                    <div class="section-title">图层属性</div>
+                    
+                    <div class="property-group">
+                        <strong>图层基本信息</strong>
+                        <div style="font-size: 0.9em; margin-bottom: 10px; display: flex; justify-content: space-between;">
+                            <span>名称:</span>
+                            <span>调整图层</span>
+                        </div>
+                        <div style="font-size: 0.9em; margin-bottom: 10px; display: flex; justify-content: space-between;">
+                            <span>类型:</span>
+                            <span>调整图层</span>
+                        </div>
+                        <div style="font-size: 0.9em; display: flex; justify-content: space-between;">
+                            <span>透明度:</span>
+                            <span>100%</span>
+                        </div>
+                        
+                        <div class="blend-mode-selector">
+                            <div class="blend-mode-label">混合模式:</div>
+                            <select class="blend-mode-select">
+                                <option>正常</option>
+                                <option>溶解</option>
+                                <option>正片叠底</option>
+                                <option>屏幕</option>
+                                <option>叠加</option>
+                                <option>柔光</option>
+                                <option>强光</option>
+                                <option>颜色减淡</option>
+                                <option>颜色加深</option>
+                                <option>线性减淡</option>
+                                <option>线性加深</option>
+                                <option>颜色</option>
+                                <option>亮度</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div class="property-group">
+                        <strong>蒙版设置</strong>
+                        <div class="mask-controls">
+                            <div class="mask-preview"></div>
+                            <div class="mask-options">
+                                <div class="mask-mode-selector">
+                                    <div class="mask-mode active">像素蒙版</div>
+                                    <div class="mask-mode">矢量蒙版</div>
+                                    <div class="mask-mode">剪贴蒙版</div>
+                                </div>
+                                <div class="mask-opacity">
+                                    <span>不透明度:</span>
+                                    <div class="mask-opacity-slider">
+                                        <div class="mask-opacity-fill"></div>
+                                        <div class="mask-opacity-handle"></div>
+                                    </div>
+                                    <span>75%</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-top: 8px;">
+                            <button class="tool-button" style="flex: 1; margin-right: 5px; justify-content: center; background-color: rgba(0, 0, 0, 0.2);">添加蒙版</button>
+                            <button class="tool-button" style="flex: 1; margin-left: 5px; justify-content: center; background-color: rgba(0, 0, 0, 0.2);">编辑蒙版</button>
+                        </div>
+                    </div>
+                    
+                    <div class="section-title">调整面板</div>
+                    <div class="property-group">
+                        <div class="slider-control">
+                            <div class="slider-label">
+                                <span>曝光</span>
+                                <span class="slider-value">+0.5</span>
+                            </div>
+                            <div class="slider-track">
+                                <div class="slider-fill" style="width: 65%;"></div>
+                                <div class="slider-handle" style="left: 65%;"></div>
+                            </div>
+                        </div>
+                        
+                        <div class="slider-control">
+                            <div class="slider-label">
+                                <span>对比度</span>
+                                <span class="slider-value">+10</span>
+                            </div>
+                            <div class="slider-track">
+                                <div class="slider-fill" style="width: 60%;"></div>
+                                <div class="slider-handle" style="left: 60%;"></div>
+                            </div>
+                        </div>
+                        
+                        <div class="slider-control">
+                            <div class="slider-label">
+                                <span>高光</span>
+                                <span class="slider-value">+15</span>
+                            </div>
+                            <div class="slider-track">
+                                <div class="slider-fill" style="width: 70%;"></div>
+                                <div class="slider-handle" style="left: 70%;"></div>
+                            </div>
+                        </div>
+                        
+                        <div class="slider-control">
+                            <div class="slider-label">
+                                <span>阴影</span>
+                                <span class="slider-value">+5</span>
+                            </div>
+                            <div class="slider-track">
+                                <div class="slider-fill" style="width: 55%;"></div>
+                                <div class="slider-handle" style="left: 55%;"></div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="property-group">
+                        <div class="slider-control">
+                            <div class="slider-label">
+                                <span>色温</span>
+                                <span class="slider-value">-5</span>
+                            </div>
+                            <div class="slider-track">
+                                <div class="slider-fill" style="width: 45%;"></div>
+                                <div class="slider-handle" style="left: 45%;"></div>
+                            </div>
+                        </div>
+                        
+                        <div class="slider-control">
+                            <div class="slider-label">
+                                <span>饱和度</span>
+                                <span class="slider-value">+8</span>
+                            </div>
+                            <div class="slider-track">
+                                <div class="slider-fill" style="width: 58%;"></div>
+                                <div class="slider-handle" style="left: 58%;"></div>
+                            </div>
+                        </div>
+                        
+                        <div class="slider-control">
+                            <div class="slider-label">
+                                <span>自然饱和度</span>
+                                <span class="slider-value">0</span>
+                            </div>
+                            <div class="slider-track">
+                                <div class="slider-fill" style="width: 50%;"></div>
+                                <div class="slider-handle" style="left: 50%;"></div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="property-group ai-tools">
+                        <strong>AI辅助工具</strong>
+                        <div class="box-grid">
+                            <button class="ai-button">自动增强</button>
+                            <button class="ai-button">智能修复</button>
+                            <button class="ai-button">主体识别</button>
+                            <button class="ai-button">风格迁移</button>
+                        </div>
+                    </div>
+                    
+                    <div class="property-group">
+                        <strong>历史记录</strong>
+                        <div style="font-size: 0.9em;">
+                            <div class="history-item">原始状态</div>
+                            <div class="history-item">调整曝光</div>
+                            <div class="history-item">调整对比度</div>
+                            <div class="history-item">添加蒙版</div>
+                            <div class="history-item active">添加滤镜</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="description">
+            <h3>主界面说明:</h3>
+            <ul>
+                <li><strong>菜单栏</strong>: 包含所有主要功能分类，包括文件操作、编辑功能、视图选项、工具选择、调整面板、滤镜库、AI工具和插件管理</li>
+                <li><strong>侧边栏</strong>: 图库浏览和管理功能，包括文件夹结构、收藏夹、标签管理和导入/导出工具</li>
+                <li><strong>工具栏</strong>: 常用编辑工具，如选择、裁剪、画笔、渐变和修复工具，以及蒙版和图层操作工具</li>
+                <li><strong>图像区域</strong>: 主要编辑区，显示当前图像，支持缩放、平移和全屏预览</li>
+                <li><strong>图层面板</strong>: 显示并管理图像的所有图层，包括普通图层、调整图层、蒙版图层和图层组</li>
+                <li><strong>属性面板</strong>: 显示并调整当前选中工具或图层的属性，包含图层属性、蒙版设置、调整面板、历史记录和AI辅助工具</li>
+                <li><strong>状态栏</strong>: 显示当前图像的基本信息和编辑状态</li>
+            </ul>
+            
+            <h3>图层与蒙版功能:</h3>
+            <ul>
+                <li><strong>图层系统</strong>: 支持多种图层类型，包括图像图层、调整图层、文字图层和形状图层</li>
+                <li><strong>图层组</strong>: 可将多个图层组织为层级结构，方便管理复杂编辑</li>
+                <li><strong>混合模式</strong>: 控制图层之间的混合方式，提供多种专业级混合选项</li>
+                <li><strong>蒙版类型</strong>: 支持像素蒙版、矢量蒙版和剪贴蒙版，满足不同编辑需求</li>
+                <li><strong>非破坏性编辑</strong>: 通过调整图层和蒙版实现无损编辑，随时可调整或撤销操作</li>
+                <li><strong>图层效果</strong>: 支持阴影、发光、斜面和浮雕等图层样式效果</li>
+            </ul>
+        </div>
+    </div>
+    
+    <div class="diagram">
+        <h2>图库模式界面</h2>
+        
+        <div class="ui-container">
+            <div class="menu-bar">
+                <div class="menu-bar-logo">TempusLoom</div>
+                <div class="menu-bar-item active">文件</div>
+                <div class="menu-bar-item">编辑</div>
+                <div class="menu-bar-item">视图</div>
+                <div class="menu-bar-item">工具</div>
+                <div class="menu-bar-item">调整</div>
+                <div class="menu-bar-item">滤镜</div>
+                <div class="menu-bar-item">AI工具</div>
+                <div class="menu-bar-item">插件</div>
+                <div class="menu-bar-item">帮助</div>
+            </div>
+            
+            <div class="filter-bar">
+                <div class="search-box">
+                    <div class="search-icon">⌕</div>
+                    <input type="text" class="search-input" placeholder="搜索图像...">
+                </div>
+                <div class="filter-button">筛选 ▾</div>
+                <div class="filter-button">排序 ▾</div>
+                <div class="filter-button">视图 ▾</div>
+            </div>
+            
+            <div style="display: flex; height: 500px;">
+                <div class="sidebar" style="width: 200px;">
+                    <div class="section-title">收藏夹</div>
+                    <div class="module-item active">风景</div>
+                    <div class="module-item">人像</div>
+                    <div class="module-item">产品</div>
+                    
+                    <div class="section-title">标签</div>
+                    <div class="module-item">假日</div>
+                    <div class="module-item">工作</div>
+                    <div class="module-item">客户项目</div>
+                    
+                    <div class="section-title">时间轴</div>
+                    <div class="module-item">2023年</div>
+                    <div class="module-item">2022年</div>
+                    <div class="module-item">更早</div>
+                </div>
+                
+                <div class="gallery-grid">
+                    <div class="gallery-item selected"></div>
+                    <div class="gallery-item"></div>
+                    <div class="gallery-item"></div>
+                    <div class="gallery-item"></div>
+                    <div class="gallery-item"></div>
+                    <div class="gallery-item"></div>
+                    <div class="gallery-item"></div>
+                    <div class="gallery-item"></div>
+                    <div class="gallery-item"></div>
+                    <div class="gallery-item"></div>
+                    <div class="gallery-item"></div>
+                    <div class="gallery-item"></div>
+                    <div class="gallery-item"></div>
+                    <div class="gallery-item"></div>
+                    <div class="gallery-item"></div>
+                    <div class="gallery-item"></div>
+                </div>
+                
+                <div class="properties" style="width: 250px;">
+                    <div class="section-title">图像信息</div>
+                    <div class="property-group">
+                        <div style="font-size: 0.9em; margin-bottom: 6px; display: flex; justify-content: space-between;">
+                            <span>文件名:</span>
+                            <strong>IMG_0123.RAW</strong>
+                        </div>
+                        <div style="font-size: 0.9em; margin-bottom: 6px; display: flex; justify-content: space-between;">
+                            <span>尺寸:</span>
+                            <strong>5472 × 3648px</strong>
+                        </div>
+                        <div style="font-size: 0.9em; margin-bottom: 6px; display: flex; justify-content: space-between;">
+                            <span>拍摄日期:</span>
+                            <strong>2023-04-15</strong>
+                        </div>
+                        <div style="font-size: 0.9em; margin-bottom: 6px; display: flex; justify-content: space-between;">
+                            <span>相机:</span>
+                            <strong>Canon EOS R5</strong>
+                        </div>
+                    </div>
+                    
+                    <div class="property-group">
+                        <div style="font-size: 0.9em; margin-bottom: 6px; display: flex; justify-content: space-between;">
+                            <span>焦距:</span>
+                            <strong>24mm</strong>
+                        </div>
+                        <div style="font-size: 0.9em; margin-bottom: 6px; display: flex; justify-content: space-between;">
+                            <span>光圈:</span>
+                            <strong>f/2.8</strong>
+                        </div>
+                        <div style="font-size: 0.9em; margin-bottom: 6px; display: flex; justify-content: space-between;">
+                            <span>ISO:</span>
+                            <strong>100</strong>
+                        </div>
+                        <div style="font-size: 0.9em; margin-bottom: 6px; display: flex; justify-content: space-between;">
+                            <span>快门:</span>
+                            <strong>1/125s</strong>
+                        </div>
+                    </div>
+                    
+                    <div class="property-group">
+                        <strong>快速编辑</strong>
+                        <div style="display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 10px;">
+                            <button class="ai-button">自动增强</button>
+                            <button class="tool-button" style="background-color: var(--primary);">应用预设</button>
+                            <button style="padding: 10px; border: none; background-color: var(--success); color: white; border-radius: 6px; cursor: pointer; font-weight: 500;">打开编辑器</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="description">
+            <h3>图库模式说明:</h3>
+            <ul>
+                <li><strong>缩略图网格</strong>: 显示多张图像缩略图，支持选择、拖放和批量操作</li>
+                <li><strong>筛选面板</strong>: 通过收藏夹、标签和其他元数据筛选图像</li>
+                <li><strong>工具栏</strong>: 提供导入、筛选、排序和批量操作功能</li>
+                <li><strong>信息面板</strong>: 显示选中图像的详细信息和快速编辑选项</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html> 

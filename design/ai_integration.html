@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>TempusLoom - AI工具集成方案</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .diagram { border: 1px solid #ccc; padding: 20px; margin-bottom: 30px; }
+        .box { border: 2px solid #333; padding: 10px; margin: 5px; border-radius: 5px; display: inline-block; text-align: center; }
+        .module { background-color: #e6f2ff; }
+        .ai-module { background-color: #ffe6f2; }
+        .integration { background-color: #e6ffe6; }
+        .arrow { margin: 0 10px; font-weight: bold; }
+        .description { margin-top: 20px; }
+        .ui-container { border: 2px solid #333; padding: 10px; border-radius: 5px; margin-top: 20px; }
+        .feature-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        .feature-table th, .feature-table td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        .feature-table th { background-color: #f2f2f2; }
+    </style>
+</head>
+<body>
+    <h1>TempusLoom AI工具集成方案</h1>
+    
+    <div class="diagram">
+        <h2>AI功能架构</h2>
+        
+        <div style="text-align: center; margin-bottom: 20px;">
+            <div class="box module" style="width: 200px;">TempusLoom 核心应用</div>
+            <div style="margin: 20px 0;">
+                <div class="box" style="width: 500px; background-color: #fff0e6;">AI服务接口层</div>
+            </div>
+            <div style="display: flex; justify-content: center; margin-top: 20px;">
+                <div class="box ai-module">本地AI<br>处理引擎</div>
+                <div class="arrow">←→</div>
+                <div class="box ai-module">云服务<br>AI连接器</div>
+                <div class="arrow">←→</div>
+                <div class="box ai-module">自定义<br>模型加载器</div>
+                <div class="arrow">←→</div>
+                <div class="box ai-module">批处理<br>AI调度器</div>
+            </div>
+            <div style="display: flex; justify-content: center; margin-top: 20px;">
+                <div class="box integration">智能<br>图像增强</div>
+                <div class="box integration">自动<br>肖像修饰</div>
+                <div class="box integration">物体<br>识别移除</div>
+                <div class="box integration">场景<br>智能分析</div>
+                <div class="box integration">风格<br>迁移引擎</div>
+                <div class="box integration">创意<br>AI生成</div>
+            </div>
+        </div>
+        
+        <div class="description">
+            <h3>AI架构说明:</h3>
+            <ul>
+                <li><strong>AI服务接口层</strong>: 统一的接口层，连接核心应用与各种AI处理引擎</li>
+                <li><strong>本地AI处理引擎</strong>: 在用户计算机上运行的轻量级AI模型，用于快速处理和基本增强</li>
+                <li><strong>云服务AI连接器</strong>: 连接到云端AI服务，用于更复杂的处理任务</li>
+                <li><strong>自定义模型加载器</strong>: 允许用户导入和使用自定义AI模型</li>
+                <li><strong>批处理AI调度器</strong>: 管理多张图像的AI处理队列，优化资源使用</li>
+                <li><strong>功能模块</strong>: 基于AI的各种图像处理功能，包括智能增强、肖像修饰、物体移除、场景分析、风格迁移和创意生成</li>
+            </ul>
+        </div>
+    </div>
+    
+    <div class="diagram">
+        <h2>主要AI功能</h2>
+        
+        <table class="feature-table">
+            <tr>
+                <th>功能类别</th>
+                <th>功能描述</th>
+                <th>应用场景</th>
+                <th>实现方式</th>
+            </tr>
+            <tr>
+                <td><strong>智能图像增强</strong></td>
+                <td>自动分析图像内容并应用最佳增强参数，提升画质、细节和色彩</td>
+                <td>自动优化曝光不足或过度的照片、提升细节和清晰度、智能降噪</td>
+                <td>本地轻量级CNN模型 + 云端高级处理选项</td>
+            </tr>
+            <tr>
+                <td><strong>人像智能处理</strong></td>
+                <td>自动检测人脸和人体，应用智能美化和修饰</td>
+                <td>皮肤平滑、眼睛增强、肤色均匀、体型调整、智能抠图</td>
+                <td>面部识别模型 + 人体分割模型 + 美化算法</td>
+            </tr>
+            <tr>
+                <td><strong>内容感知编辑</strong></td>
+                <td>基于图像内容的智能编辑工具</td>
+                <td>物体移除、内容填充、智能裁剪、视觉重组</td>
+                <td>对象检测 + 语义分割 + 生成式填充</td>
+            </tr>
+            <tr>
+                <td><strong>场景识别与分类</strong></td>
+                <td>自动识别图像场景类型和主体内容</td>
+                <td>智能组织图库、自动标签生成、内容推荐</td>
+                <td>场景分类模型 + 对象识别网络</td>
+            </tr>
+            <tr>
+                <td><strong>风格迁移与滤镜</strong></td>
+                <td>智能应用艺术风格和创意滤镜</td>
+                <td>艺术风格化、电影色调、创意滤镜、情绪调整</td>
+                <td>StyleGAN + 色彩映射算法</td>
+            </tr>
+            <tr>
+                <td><strong>生成式AI创作</strong></td>
+                <td>创建新内容或扩展现有图像</td>
+                <td>图像扩展、背景生成、元素添加、创意构图</td>
+                <td>扩散模型 + 条件生成网络</td>
+            </tr>
+        </table>
+    </div>
+    
+    <div class="diagram">
+        <h2>AI工具界面设计</h2>
+        
+        <div class="ui-container">
+            <div style="background-color: #f0f0f0; padding: 5px; border-bottom: 1px solid #ccc; font-weight: bold;">AI工具面板</div>
+            <div style="display: flex; margin-top: 10px;">
+                <div style="width: 200px; border-right: 1px solid #ccc; padding-right: 10px;">
+                    <div style="font-weight: bold; margin-bottom: 10px;">AI功能分类</div>
+                    <div style="padding: 5px; background-color: #ffe6f2; margin-bottom: 5px; border-radius: 3px;">智能增强</div>
+                    <div style="padding: 5px; margin-bottom: 5px;">人像美化</div>
+                    <div style="padding: 5px; margin-bottom: 5px;">内容编辑</div>
+                    <div style="padding: 5px; margin-bottom: 5px;">场景分析</div>
+                    <div style="padding: 5px; margin-bottom: 5px;">风格迁移</div>
+                    <div style="padding: 5px; margin-bottom: 5px;">创意生成</div>
+                </div>
+                <div style="flex-grow: 1; padding: 0 10px;">
+                    <div style="font-weight: bold; margin-bottom: 10px;">智能增强工具</div>
+                    
+                    <div style="display: flex; margin-bottom: 15px;">
+                        <div style="flex: 1; border: 1px solid #ccc; padding: 10px; margin-right: 10px; border-radius: 3px;">
+                            <div style="font-weight: bold; margin-bottom: 5px;">自动优化</div>
+                            <div style="margin-bottom: 10px;">一键优化整体图像</div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <div>强度: [-----O-----]</div>
+                                <button style="padding: 3px 10px;">应用</button>
+                            </div>
+                        </div>
+                        <div style="flex: 1; border: 1px solid #ccc; padding: 10px; border-radius: 3px;">
+                            <div style="font-weight: bold; margin-bottom: 5px;">智能细节增强</div>
+                            <div style="margin-bottom: 10px;">增强图像细节而不引入噪点</div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <div>强度: [------O----]</div>
+                                <button style="padding: 3px 10px;">应用</button>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div style="display: flex; margin-bottom: 15px;">
+                        <div style="flex: 1; border: 1px solid #ccc; padding: 10px; margin-right: 10px; border-radius: 3px;">
+                            <div style="font-weight: bold; margin-bottom: 5px;">AI降噪</div>
+                            <div style="margin-bottom: 10px;">智能去除噪点保留细节</div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <div>
+                                    强度: [-------O---]<br>
+                                    保护细节: [-----O-----]
+                                </div>
+                                <button style="padding: 3px 10px;">应用</button>
+                            </div>
+                        </div>
+                        <div style="flex: 1; border: 1px solid #ccc; padding: 10px; border-radius: 3px;">
+                            <div style="font-weight: bold; margin-bottom: 5px;">智能HDR效果</div>
+                            <div style="margin-bottom: 10px;">创建平衡的高动态范围效果</div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <div>
+                                    强度: [------O----]<br>
+                                    自然度: [--------O--]
+                                </div>
+                                <button style="padding: 3px 10px;">应用</button>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div style="border: 1px solid #ccc; padding: 10px; border-radius: 3px; margin-bottom: 15px;">
+                        <div style="font-weight: bold; margin-bottom: 5px;">智能场景优化</div>
+                        <div style="margin-bottom: 10px;">已检测场景: <strong>风景</strong> (置信度: 94%)</div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                            <div>应用场景特定优化:</div>
+                            <div>
+                                <input type="checkbox" checked> 天空增强
+                                <input type="checkbox" checked> 植被优化
+                                <input type="checkbox"> 水面反射
+                            </div>
+                        </div>
+                        <div style="display: flex; justify-content: flex-end;">
+                            <button style="padding: 3px 10px;">分析场景</button>
+                            <button style="padding: 3px 10px; margin-left: 10px;">应用优化</button>
+                        </div>
+                    </div>
+                    
+                    <div style="border: 1px solid #ccc; padding: 10px; border-radius: 3px;">
+                        <div style="font-weight: bold; margin-bottom: 5px;">处理设置</div>
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                            <div>处理模式:</div>
+                            <div>
+                                <input type="radio" name="mode" checked> 本地处理
+                                <input type="radio" name="mode"> 云服务 (高质量)
+                            </div>
+                        </div>
+                        <div style="display: flex; justify-content: space-between;">
+                            <div>处理质量:</div>
+                            <select style="width: 120px;">
+                                <option>草图质量</option>
+                                <option selected>标准质量</option>
+                                <option>专业质量</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="ui-container" style="margin-top: 20px;">
+            <div style="background-color: #f0f0f0; padding: 5px; border-bottom: 1px solid #ccc; font-weight: bold;">内容感知编辑工具</div>
+            <div style="display: flex; padding: 10px;">
+                <div style="flex: 3; background-color: #e6e6e6; height: 300px; display: flex; justify-content: center; align-items: center; border: 1px solid #ccc;">
+                    <div style="width: 80%; height: 80%; background-color: white; border: 1px solid #999; position: relative;">
+                        <div style="position: absolute; top: 30%; left: 60%; width: 30%; height: 40%; border: 2px dashed red; background-color: rgba(255, 0, 0, 0.1);"></div>
+                    </div>
+                </div>
+                <div style="flex: 1; padding-left: 15px;">
+                    <div style="font-weight: bold; margin-bottom: 10px;">内容移除工具</div>
+                    <div style="border: 1px solid #ccc; padding: 10px; border-radius: 3px; margin-bottom: 15px;">
+                        <div style="margin-bottom: 10px;">
+                            <strong>已选区域:</strong><br>
+                            240 x 320 像素
+                        </div>
+                        <div style="margin-bottom: 10px;">
+                            <strong>检测到的内容:</strong><br>
+                            人物 (87%)<br>
+                            电线杆 (63%)
+                        </div>
+                        <div style="margin-bottom: 10px;">
+                            <strong>填充选项:</strong><br>
+                            <select style="width: 100%; margin-top: 5px;">
+                                <option>智能上下文填充</option>
+                                <option>内容匹配</option>
+                                <option>AI生成填充</option>
+                            </select>
+                        </div>
+                        <div>
+                            <button style="width: 100%; padding: 5px;">移除并填充</button>
+                        </div>
+                    </div>
+                    <div>
+                        <button style="width: 100%; padding: 5px; margin-bottom: 10px;">自动检测主体</button>
+                        <button style="width: 100%; padding: 5px;">预览结果</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="description">
+            <h3>AI界面说明:</h3>
+            <ul>
+                <li><strong>AI工具面板</strong>: 分类展示各种AI功能，包括智能增强、人像美化、内容编辑等</li>
+                <li><strong>智能增强工具</strong>: 提供一键优化、细节增强、降噪和智能HDR等功能</li>
+                <li><strong>场景识别</strong>: 自动识别图像场景类型，并提供场景特定的优化选项</li>
+                <li><strong>处理设置</strong>: 允许用户选择本地或云端处理，以及不同的处理质量级别</li>
+                <li><strong>内容感知编辑</strong>: 智能识别并移除图像中的对象，使用AI生成技术填充空白区域</li>
+                <li><strong>直观的用户界面</strong>: 每个工具都提供简单明了的控制选项，同时显示相关的图像分析信息</li>
+            </ul>
+        </div>
+    </div>
+    
+    <div class="diagram">
+        <h2>AI模型集成框架</h2>
+        
+        <div style="text-align: center; margin-bottom: 20px;">
+            <div style="display: flex; justify-content: center; margin-bottom: 20px;">
+                <div class="box module" style="width: 300px;">TempusLoom AI框架</div>
+            </div>
+            <div style="display: flex; justify-content: center; gap: 20px;">
+                <div style="border: 1px solid #333; border-radius: 5px; padding: 10px; width: 250px;">
+                    <div style="font-weight: bold; margin-bottom: 10px;">本地轻量级模型</div>
+                    <div style="text-align: left; margin-bottom: 5px;">• 基础图像增强</div>
+                    <div style="text-align: left; margin-bottom: 5px;">• 简单物体识别</div>
+                    <div style="text-align: left; margin-bottom: 5px;">• 基础肖像增强</div>
+                    <div style="text-align: left; margin-bottom: 5px;">• 简单风格迁移</div>
+                    <div style="text-align: left;">• 基础降噪与锐化</div>
+                </div>
+                <div style="border: 1px solid #333; border-radius: 5px; padding: 10px; width: 250px;">
+                    <div style="font-weight: bold; margin-bottom: 10px;">云端高级模型</div>
+                    <div style="text-align: left; margin-bottom: 5px;">• 高级内容感知编辑</div>
+                    <div style="text-align: left; margin-bottom: 5px;">• 复杂对象识别与分割</div>
+                    <div style="text-align: left; margin-bottom: 5px;">• 高级肖像修饰</div>
+                    <div style="text-align: left; margin-bottom: 5px;">• 生成式图像扩展</div>
+                    <div style="text-align: left;">• 高级场景重建</div>
+                </div>
+                <div style="border: 1px solid #333; border-radius: 5px; padding: 10px; width: 250px;">
+                    <div style="font-weight: bold; margin-bottom: 10px;">自定义模型支持</div>
+                    <div style="text-align: left; margin-bottom: 5px;">• ONNX格式支持</div>
+                    <div style="text-align: left; margin-bottom: 5px;">• TensorFlow模型</div>
+                    <div style="text-align: left; margin-bottom: 5px;">• PyTorch模型</div>
+                    <div style="text-align: left; margin-bottom: 5px;">• 自定义预处理钩子</div>
+                    <div style="text-align: left;">• 模型性能优化</div>
+                </div>
+            </div>
+        </div>
+        
+        <div style="margin-top: 20px; border: 1px solid #ccc; padding: 15px; border-radius: 5px;">
+            <h3>模型开发接口示例</h3>
+            <pre style="background-color: #f5f5f5; padding: 10px; font-family: monospace; border-radius: 5px;">
+# 自定义AI模型集成示例
+from tempusloom.ai import AIModelInterface
+from tempusloom.image import ImageData
+import numpy as np
+import onnxruntime as ort
+
+class CustomStyleTransfer(AIModelInterface):
+    def __init__(self):
+        super().__init__()
+        self.model_path = None
+        self.session = None
+        self.style_name = "自定义艺术风格"
+        
+    def load_model(self, model_path):
+        """加载ONNX模型"""
+        self.model_path = model_path
+        self.session = ort.InferenceSession(model_path)
+        
+    def preprocess(self, image_data):
+        """图像预处理"""
+        # 将图像转换为模型输入格式
+        img = image_data.get_numpy_array()
+        img = img.astype(np.float32) / 255.0
+        img = np.transpose(img, (2, 0, 1))
+        img = np.expand_dims(img, axis=0)
+        return img
+        
+    def run_inference(self, preprocessed_data):
+        """执行模型推理"""
+        input_name = self.session.get_inputs()[0].name
+        output_name = self.session.get_outputs()[0].name
+        result = self.session.run([output_name], {input_name: preprocessed_data})
+        return result[0]
+        
+    def postprocess(self, inference_result):
+        """结果后处理"""
+        # 将模型输出转换回图像格式
+        img = inference_result[0]
+        img = np.transpose(img, (1, 2, 0))
+        img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
+        return ImageData(img)
+        
+    def process(self, image_data, intensity=1.0):
+        """完整处理流程"""
+        preprocessed = self.preprocess(image_data)
+        result = self.run_inference(preprocessed)
+        processed = self.postprocess(result)
+        
+        # 根据强度混合原始图像和处理结果
+        if intensity < 1.0:
+            return image_data.blend(processed, intensity)
+        return processed
+        
+    def get_properties(self):
+        """返回模型属性"""
+        return {
+            "name": self.style_name,
+            "type": "style_transfer",
+            "author": "自定义",
+            "description": "自定义风格迁移模型",
+            "version": "1.0.0",
+            "parameters": [
+                {"name": "intensity", "type": "float", "min": 0.0, "max": 1.0, "default": 1.0}
+            ]
+        }
+</pre>
+        </div>
+        
+        <div class="description">
+            <h3>AI模型集成框架说明:</h3>
+            <ul>
+                <li><strong>三层模型架构</strong>: 本地轻量级模型、云端高级模型和自定义模型支持</li>
+                <li><strong>本地轻量级模型</strong>: 针对常见任务优化的小型模型，可在用户计算机上快速运行</li>
+                <li><strong>云端高级模型</strong>: 更大、更复杂的模型，通过API连接到云服务运行</li>
+                <li><strong>自定义模型支持</strong>: 支持多种格式的用户自定义模型，允许开发者扩展软件功能</li>
+                <li><strong>统一的开发接口</strong>: 提供标准化的接口，简化AI模型的集成和部署</li>
+                <li><strong>模型生命周期管理</strong>: 包括加载、预处理、推理、后处理和结果应用的完整流程</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html> 

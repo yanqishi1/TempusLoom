@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>TempusLoom - 技术架构与实现方案</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .diagram { border: 1px solid #ccc; padding: 20px; margin-bottom: 30px; }
+        .box { border: 2px solid #333; padding: 10px; margin: 5px; border-radius: 5px; display: inline-block; text-align: center; }
+        .component { background-color: #e6f2ff; }
+        .library { background-color: #ffe6e6; }
+        .service { background-color: #e6ffe6; }
+        .arrow { margin: 0 10px; font-weight: bold; }
+        .description { margin-top: 20px; }
+        .code-sample { background-color: #f5f5f5; padding: 10px; border: 1px solid #ccc; font-family: monospace; margin: 10px 0; border-radius: 5px; }
+        .tech-table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        .tech-table th, .tech-table td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        .tech-table th { background-color: #f2f2f2; }
+    </style>
+</head>
+<body>
+    <h1>TempusLoom 技术架构与实现方案</h1>
+    
+    <div class="diagram">
+        <h2>技术架构概览</h2>
+        
+        <div style="text-align: center; margin-bottom: 20px;">
+            <div style="display: flex; justify-content: center; margin-bottom: 20px;">
+                <div class="box" style="width: 600px; background-color: #f0f0f0;">
+                    <strong>TempusLoom 应用</strong>
+                </div>
+            </div>
+            
+            <div style="display: flex; justify-content: center; gap: 20px; margin-bottom: 20px;">
+                <div class="box component" style="width: 180px;">
+                    <strong>UI层</strong><br>
+                    (PyQt/PySide)
+                </div>
+                <div class="box component" style="width: 180px;">
+                    <strong>业务逻辑层</strong><br>
+                    (Core Logic)
+                </div>
+                <div class="box component" style="width: 180px;">
+                    <strong>数据访问层</strong><br>
+                    (Data Access)
+                </div>
+            </div>
+            
+            <div style="display: flex; justify-content: center; gap: 20px; margin-bottom: 20px;">
+                <div class="box library" style="width: 130px;">
+                    <strong>图像处理引擎</strong><br>
+                    (OpenCV, PIL)
+                </div>
+                <div class="box library" style="width: 130px;">
+                    <strong>AI处理引擎</strong><br>
+                    (ONNX, TF-Lite)
+                </div>
+                <div class="box library" style="width: 130px;">
+                    <strong>文件处理</strong><br>
+                    (Raw, Meta)
+                </div>
+                <div class="box library" style="width: 130px;">
+                    <strong>插件系统</strong><br>
+                    (Plugin API)
+                </div>
+            </div>
+            
+            <div style="display: flex; justify-content: center; gap: 20px;">
+                <div class="box service" style="width: 280px;">
+                    <strong>操作系统服务</strong><br>
+                    (文件系统, GPU加速)
+                </div>
+                <div class="box service" style="width: 280px;">
+                    <strong>外部服务</strong><br>
+                    (云AI服务, 资源库)
+                </div>
+            </div>
+        </div>
+        
+        <div class="description">
+            <h3>技术架构说明:</h3>
+            <ul>
+                <li><strong>UI层</strong>: 基于PyQt/PySide构建的用户界面，提供响应式、现代化的交互体验</li>
+                <li><strong>业务逻辑层</strong>: 处理核心应用功能，包括图像编辑、工作流管理和用户操作</li>
+                <li><strong>数据访问层</strong>: 管理图像数据、元数据和用户设置的读取和存储</li>
+                <li><strong>图像处理引擎</strong>: 基于OpenCV和PIL的高性能图像处理库</li>
+                <li><strong>AI处理引擎</strong>: 集成ONNX Runtime和TensorFlow Lite的AI模型执行环境</li>
+                <li><strong>文件处理</strong>: 支持多种图像格式和元数据标准的处理能力</li>
+                <li><strong>插件系统</strong>: 提供扩展应用功能的标准化接口</li>
+                <li><strong>操作系统服务</strong>: 利用操作系统提供的文件系统访问和GPU加速能力</li>
+                <li><strong>外部服务</strong>: 连接云端AI服务和在线资源库</li>
+            </ul>
+        </div>
+    </div>
+    
+    <div class="diagram">
+        <h2>核心技术选型</h2>
+        
+        <table class="tech-table">
+            <tr>
+                <th>技术领域</th>
+                <th>选用技术</th>
+                <th>优势</th>
+                <th>应用场景</th>
+            </tr>
+            <tr>
+                <td><strong>开发语言</strong></td>
+                <td>Python 3.10+</td>
+                <td>良好的生态系统、快速开发、跨平台兼容性、AI库支持</td>
+                <td>整个应用的核心开发语言</td>
+            </tr>
+            <tr>
+                <td><strong>GUI框架</strong></td>
+                <td>PyQt6 / PySide6</td>
+                <td>成熟稳定、高性能、跨平台、丰富的UI组件</td>
+                <td>用户界面开发、交互控件</td>
+            </tr>
+            <tr>
+                <td><strong>图像处理</strong></td>
+                <td>OpenCV, Pillow, scikit-image</td>
+                <td>高性能图像处理、丰富的算法库、GPU加速支持</td>
+                <td>基础图像操作、滤镜效果、色彩调整</td>
+            </tr>
+            <tr>
+                <td><strong>AI处理</strong></td>
+                <td>ONNX Runtime, TensorFlow Lite, PyTorch</td>
+                <td>模型兼容性、轻量级执行、硬件加速</td>
+                <td>AI模型执行、图像增强、智能处理</td>
+            </tr>
+            <tr>
+                <td><strong>RAW处理</strong></td>
+                <td>rawpy, LibRaw</td>
+                <td>支持多种RAW格式、高质量解码、色彩管理</td>
+                <td>RAW文件导入、处理和转换</td>
+            </tr>
+            <tr>
+                <td><strong>元数据处理</strong></td>
+                <td>ExifTool, Exiv2</td>
+                <td>全面的元数据支持、读写能力、多格式兼容</td>
+                <td>读取和修改图像元数据</td>
+            </tr>
+            <tr>
+                <td><strong>数据存储</strong></td>
+                <td>SQLite, JSON</td>
+                <td>轻量级、无服务器要求、易于集成</td>
+                <td>目录管理、用户设置、历史记录</td>
+            </tr>
+            <tr>
+                <td><strong>插件系统</strong></td>
+                <td>自定义插件框架</td>
+                <td>灵活性、安全沙盒、版本兼容性</td>
+                <td>支持第三方扩展和AI工具集成</td>
+            </tr>
+            <tr>
+                <td><strong>打包与分发</strong></td>
+                <td>PyInstaller, cx_Freeze</td>
+                <td>创建独立可执行文件、处理依赖关系</td>
+                <td>应用程序打包和分发</td>
+            </tr>
+        </table>
+    </div>
+    
+    <div class="diagram">
+        <h2>模块结构设计</h2>
+        
+        <div class="code-sample">
+            <pre>
+tempusloom/
+├── __init__.py
+├── main.py                 # 应用入口点
+├── config/                 # 配置管理
+│   ├── __init__.py
+│   ├── settings.py         # 全局设置
+│   └── user_config.py      # 用户配置
+├── core/                   # 核心功能
+│   ├── __init__.py
+│   ├── image_processor.py  # 图像处理核心
+│   ├── file_manager.py     # 文件管理
+│   ├── metadata.py         # 元数据处理
+│   ├── history.py          # 历史记录管理
+│   └── presets.py          # 预设管理
+├── ui/                     # 用户界面
+│   ├── __init__.py
+│   ├── main_window.py      # 主窗口
+│   ├── library_view.py     # 图库视图
+│   ├── edit_view.py        # 编辑视图
+│   ├── tools/              # 工具UI组件
+│   ├── panels/             # 面板UI组件
+│   └── dialogs/            # 对话框
+├── imaging/                # 图像处理
+│   ├── __init__.py
+│   ├── adjustments.py      # 基本调整
+│   ├── filters.py          # 滤镜效果
+│   ├── transforms.py       # 图像变换
+│   ├── raw.py              # RAW处理
+│   └── color.py            # 色彩管理
+├── ai/                     # AI功能
+│   ├── __init__.py
+│   ├── engine.py           # AI执行引擎
+│   ├── models.py           # 模型管理
+│   ├── cloud_services.py   # 云服务连接
+│   └── tools/              # 各种AI工具
+├── plugins/                # 插件系统
+│   ├── __init__.py
+│   ├── manager.py          # 插件管理器
+│   ├── api.py              # 插件API
+│   ├── loader.py           # 插件加载器
+│   └── sandbox.py          # 安全沙盒
+├── data/                   # 数据管理
+│   ├── __init__.py
+│   ├── database.py         # 数据库访问
+│   ├── catalog.py          # 图像目录
+│   └── cache.py            # 缓存管理
+├── utils/                  # 实用工具
+│   ├── __init__.py
+│   ├── performance.py      # 性能优化
+│   ├── threading.py        # 线程管理
+│   └── logging.py          # 日志系统
+└── resources/              # 资源文件
+    ├── icons/              # 图标
+    ├── styles/             # 样式表
+    └── default_presets/    # 默认预设
+</pre>
+        </div>
+        
+        <div class="description">
+            <h3>模块结构说明:</h3>
+            <ul>
+                <li><strong>main.py</strong>: 应用程序入口点，负责初始化和启动应用</li>
+                <li><strong>config/</strong>: 管理全局配置和用户设置</li>
+                <li><strong>core/</strong>: 包含应用程序的核心功能和业务逻辑</li>
+                <li><strong>ui/</strong>: 用户界面组件，基于PyQt/PySide实现</li>
+                <li><strong>imaging/</strong>: 图像处理相关功能，包括调整、滤镜和变换</li>
+                <li><strong>ai/</strong>: AI功能模块，包括模型管理和工具实现</li>
+                <li><strong>plugins/</strong>: 插件系统，管理第三方扩展和工具</li>
+                <li><strong>data/</strong>: 数据管理层，处理数据库访问和图像目录</li>
+                <li><strong>utils/</strong>: 通用工具函数和辅助类</li>
+                <li><strong>resources/</strong>: 应用程序资源文件，如图标和样式表</li>
+            </ul>
+        </div>
+    </div>
+    
+    <div class="diagram">
+        <h2>核心代码示例</h2>
+        
+        <h3>图像处理核心实现</h3>
+        <div class="code-sample">
+            <pre>
+# core/image_processor.py
+import numpy as np
+import cv2
+from PIL import Image
+import threading
+from tempusloom.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+class ImageProcessor:
+    """图像处理核心类，处理所有图像操作"""
+    
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.cache = {}  # 缓存处理结果
+        
+    def load_image(self, file_path):
+        """加载图像文件"""
+        try:
+            # 检查文件类型
+            if file_path.lower().endswith(('.raw', '.cr2', '.nef', '.arw')):
+                return self._load_raw(file_path)
+            else:
+                return cv2.imread(file_path)
+        except Exception as e:
+            logger.error(f"Error loading image {file_path}: {e}")
+            return None
+            
+    def _load_raw(self, file_path):
+        """加载RAW格式图像"""
+        import rawpy
+        with rawpy.imread(file_path) as raw:
+            rgb = raw.postprocess(use_camera_wb=True, half_size=False, no_auto_bright=False)
+            return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    
+    def apply_adjustment(self, image, adjustment_type, params):
+        """应用基础调整"""
+        with self.lock:
+            cache_key = (id(image), adjustment_type, str(params))
+            if cache_key in self.cache:
+                return self.cache[cache_key]
+                
+            result = None
+            if adjustment_type == "exposure":
+                result = self._adjust_exposure(image, params['value'])
+            elif adjustment_type == "contrast":
+                result = self._adjust_contrast(image, params['value'])
+            elif adjustment_type == "saturation":
+                result = self._adjust_saturation(image, params['value'])
+            elif adjustment_type == "temperature":
+                result = self._adjust_temperature(image, params['value'])
+            elif adjustment_type == "tint":
+                result = self._adjust_tint(image, params['value'])
+            # ... 其他调整类型
+            
+            # 缓存结果
+            if result is not None:
+                self.cache[cache_key] = result
+                
+            return result
+    
+    def _adjust_exposure(self, image, value):
+        """调整曝光度"""
+        # 转换为浮点型进行处理
+        img_float = image.astype(np.float32) / 255.0
+        # 应用曝光调整，value范围为-100到100
+        factor = np.power(2, value / 50.0)  # 将值映射到合适的范围
+        img_adjusted = img_float * factor
+        # 裁剪到0-1范围并转回8位格式
+        img_result = np.clip(img_adjusted * 255.0, 0, 255).astype(np.uint8)
+        return img_result
+    
+    def _adjust_contrast(self, image, value):
+        """调整对比度"""
+        # value范围为-100到100
+        alpha = 1.0 + value / 100.0  # 对比度因子
+        beta = 128 * (1 - alpha)  # 亮度偏移
+        img_result = cv2.convertScaleAbs(image, alpha=alpha, beta=beta)
+        return img_result
+    
+    def _adjust_saturation(self, image, value):
+        """调整饱和度"""
+        # 转换为HSV颜色空间
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV).astype(np.float32)
+        # 调整S通道，value范围为-100到100
+        hsv[:, :, 1] = hsv[:, :, 1] * (1.0 + value / 100.0)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1], 0, 255)
+        # 转回BGR颜色空间
+        img_result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        return img_result
+        
+    def _adjust_temperature(self, image, value):
+        """调整色温"""
+        # 通过调整RGB通道的相对强度实现色温调整
+        # value范围为-100到100，负值偏蓝，正值偏黄
+        img_float = image.astype(np.float32)
+        if value > 0:
+            # 偏黄，增加红色和绿色，减少蓝色
+            factor_r = 1.0 + 0.05 * (value / 100.0)
+            factor_g = 1.0 + 0.025 * (value / 100.0)
+            factor_b = 1.0 - 0.05 * (value / 100.0)
+        else:
+            # 偏蓝，增加蓝色，减少红色和绿色
+            value = abs(value)
+            factor_r = 1.0 - 0.05 * (value / 100.0)
+            factor_g = 1.0 - 0.025 * (value / 100.0)
+            factor_b = 1.0 + 0.05 * (value / 100.0)
+        
+        # 分别调整各通道
+        img_float[:, :, 0] = np.clip(img_float[:, :, 0] * factor_b, 0, 255)
+        img_float[:, :, 1] = np.clip(img_float[:, :, 1] * factor_g, 0, 255)
+        img_float[:, :, 2] = np.clip(img_float[:, :, 2] * factor_r, 0, 255)
+        
+        return img_float.astype(np.uint8)
+    
+    def apply_filter(self, image, filter_name, intensity=1.0):
+        """应用滤镜效果"""
+        # 根据滤镜名称应用不同的处理
+        # ...
+        
+    def crop_image(self, image, x, y, width, height):
+        """裁剪图像"""
+        return image[y:y+height, x:x+width]
+    
+    def resize_image(self, image, width, height, interpolation=cv2.INTER_LANCZOS4):
+        """调整图像尺寸"""
+        return cv2.resize(image, (width, height), interpolation=interpolation)
+    
+    def rotate_image(self, image, angle, maintain_size=True):
+        """旋转图像"""
+        # ...
+        
+    def clear_cache(self):
+        """清除处理缓存"""
+        with self.lock:
+            self.cache.clear()
+</pre>
+        </div>
+        
+        <h3>插件系统核心实现</h3>
+        <div class="code-sample">
+            <pre>
+# plugins/api.py
+from abc import ABC, abstractmethod
+import inspect
+import os
+import sys
+import importlib.util
+import json
+from tempusloom.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+class PluginInterface(ABC):
+    """插件接口基类，所有插件必须继承此类"""
+    
+    @abstractmethod
+    def initialize(self):
+        """初始化插件"""
+        pass
+        
+    @abstractmethod
+    def get_info(self):
+        """获取插件信息"""
+        pass
+        
+    @abstractmethod
+    def cleanup(self):
+        """清理资源"""
+        pass
+        
+    def get_ui_components(self):
+        """获取插件UI组件，默认为空"""
+        return []
+
+
+# plugins/manager.py
+class PluginManager:
+    """插件管理器，负责加载、启用和禁用插件"""
+    
+    def __init__(self, app_instance):
+        self.app = app_instance
+        self.plugins = {}  # 已加载的插件
+        self.plugin_paths = []  # 插件搜索路径
+        self.enabled_plugins = set()  # 已启用的插件
+        
+    def add_plugin_path(self, path):
+        """添加插件搜索路径"""
+        if os.path.isdir(path) and path not in self.plugin_paths:
+            self.plugin_paths.append(path)
+            
+    def discover_plugins(self):
+        """发现所有可用插件"""
+        discovered = {}
+        
+        for path in self.plugin_paths:
+            for item in os.listdir(path):
+                plugin_path = os.path.join(path, item)
+                
+                # 检查是否是目录并包含manifest.json
+                manifest_path = os.path.join(plugin_path, "manifest.json")
+                if os.path.isdir(plugin_path) and os.path.isfile(manifest_path):
+                    try:
+                        with open(manifest_path, 'r') as f:
+                            manifest = json.load(f)
+                            
+                        # 验证manifest格式
+                        if self._validate_manifest(manifest):
+                            discovered[manifest["id"]] = {
+                                "path": plugin_path,
+                                "manifest": manifest,
+                                "loaded": False
+                            }
+                    except Exception as e:
+                        logger.error(f"Error parsing manifest for plugin at {plugin_path}: {e}")
+                        
+        return discovered
+        
+    def _validate_manifest(self, manifest):
+        """验证插件清单是否有效"""
+        required_fields = ["id", "name", "version", "entry_point"]
+        return all(field in manifest for field in required_fields)
+        
+    def load_plugin(self, plugin_id, plugin_info):
+        """加载单个插件"""
+        if plugin_id in self.plugins:
+            return True  # 已加载
+            
+        try:
+            # 获取插件入口点
+            plugin_path = plugin_info["path"]
+            manifest = plugin_info["manifest"]
+            entry_point = manifest["entry_point"]
+            
+            # 加载模块
+            module_path = os.path.join(plugin_path, entry_point)
+            spec = importlib.util.spec_from_file_location(f"plugin_{plugin_id}", module_path)
+            if spec is None:
+                logger.error(f"Could not find entry point {entry_point} for plugin {plugin_id}")
+                return False
+                
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            
+            # 查找插件类
+            plugin_class = None
+            for name, obj in inspect.getmembers(module):
+                if (inspect.isclass(obj) and issubclass(obj, PluginInterface) and 
+                    obj is not PluginInterface):
+                    plugin_class = obj
+                    break
+                    
+            if plugin_class is None:
+                logger.error(f"No plugin class found in {entry_point} for plugin {plugin_id}")
+                return False
+                
+            # 实例化插件
+            plugin_instance = plugin_class()
+            
+            # 存储插件信息
+            self.plugins[plugin_id] = {
+                "instance": plugin_instance,
+                "manifest": manifest,
+                "path": plugin_path
+            }
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error loading plugin {plugin_id}: {e}")
+            return False
+            
+    def enable_plugin(self, plugin_id):
+        """启用插件"""
+        if plugin_id not in self.plugins:
+            return False
+            
+        if plugin_id in self.enabled_plugins:
+            return True  # 已启用
+            
+        try:
+            # 初始化插件
+            plugin = self.plugins[plugin_id]["instance"]
+            plugin.initialize()
+            
+            # 添加到已启用列表
+            self.enabled_plugins.add(plugin_id)
+            
+            # 注册UI组件
+            ui_components = plugin.get_ui_components()
+            for component in ui_components:
+                self.app.register_plugin_ui_component(component)
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error enabling plugin {plugin_id}: {e}")
+            return False
+            
+    def disable_plugin(self, plugin_id):
+        """禁用插件"""
+        if plugin_id not in self.enabled_plugins:
+            return False
+            
+        try:
+            # 清理资源
+            plugin = self.plugins[plugin_id]["instance"]
+            plugin.cleanup()
+            
+            # 从已启用列表移除
+            self.enabled_plugins.remove(plugin_id)
+            
+            # 移除UI组件
+            ui_components = plugin.get_ui_components()
+            for component in ui_components:
+                self.app.unregister_plugin_ui_component(component)
+                
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error disabling plugin {plugin_id}: {e}")
+            return False
+            
+    def get_plugin_info(self, plugin_id):
+        """获取插件信息"""
+        if plugin_id in self.plugins:
+            return self.plugins[plugin_id]["manifest"]
+        return None
+        
+    def is_plugin_enabled(self, plugin_id):
+        """检查插件是否已启用"""
+        return plugin_id in self.enabled_plugins
+</pre>
+        </div>
+        
+        <div class="description">
+            <h3>核心代码说明:</h3>
+            <ul>
+                <li><strong>图像处理核心</strong>: 基于OpenCV实现的图像处理类，提供曝光、对比度、饱和度等基础调整功能，同时支持RAW格式处理和图像变换操作</li>
+                <li><strong>插件系统</strong>: 包含插件接口定义和插件管理器，支持插件的发现、加载、启用和禁用，提供安全的插件沙盒环境</li>
+                <li><strong>模块化设计</strong>: 将功能拆分为独立的模块，便于维护和扩展</li>
+                <li><strong>线程安全</strong>: 使用锁机制确保多线程环境下的数据一致性</li>
+                <li><strong>性能优化</strong>: 通过缓存机制避免重复计算，提高响应速度</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html> 
