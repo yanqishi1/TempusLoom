@@ -1,574 +1,291 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """
-TempusLoom - UI Styling
-Styling utilities for the application UI
+TempusLoom dark theme stylesheet.
+Design tokens match the pencil.pen design file.
 """
 
-import os
-import logging
+from PyQt6.QtGui import QPalette, QColor
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QPalette, QColor, QPixmap, QPainter, QBrush, QIcon, QPen, QFont
-from PyQt6.QtCore import Qt, QRect
-
-logger = logging.getLogger(__name__)
 
 
-# Color palette definitions
-DARK_PALETTE = {
-    'primary': '#4361ee',
-    'primary_light': '#4895ef',
-    'primary_dark': '#3a0ca3',
-    'secondary': '#4cc9f0',
-    'accent': '#f72585',
-    'dark': '#151526',
-    'dark_medium': '#1f1f3a',
-    'dark_light': '#292952',
-    'light': '#f8f9fa',
-    'gray_100': '#f3f4f6',
-    'gray_200': '#e5e7eb',
-    'gray_300': '#d1d5db',
-    'gray_400': '#9ca3af',
-    'gray_500': '#6b7280',
-    'success': '#10b981',
-    'warning': '#f59e0b',
-    'error': '#ef4444',
-}
-
-LIGHT_PALETTE = {
-    'primary': '#4361ee',
-    'primary_light': '#4895ef',
-    'primary_dark': '#3a0ca3',
-    'secondary': '#4cc9f0',
-    'accent': '#f72585',
-    'dark': '#27293d',
-    'dark_medium': '#323252',
-    'dark_light': '#3a3a64',
-    'light': '#ffffff',
-    'gray_100': '#f3f4f6',
-    'gray_200': '#e5e7eb',
-    'gray_300': '#d1d5db',
-    'gray_400': '#9ca3af',
-    'gray_500': '#6b7280',
-    'success': '#10b981',
-    'warning': '#f59e0b',
-    'error': '#ef4444',
-}
+# ── colour tokens ─────────────────────────────────────────────────────────────
+PRIMARY       = "#3370FF"
+PRIMARY_HOVER = "#5B8FF9"
+BG_APP        = "#181818"   # main window / grid area
+BG_TOPBAR     = "#252525"   # navigation bar
+BG_PANEL      = "#1e1e1e"   # sidebar & info panel
+BG_ITEM       = "#2c2c2c"   # toolbar chips, search box
+BG_ACTIVE     = "#1a3060"   # selected sidebar item, avatar
+BORDER        = "#333333"   # separators / horizontal lines
+BORDER_PANEL  = "#2d2d2d"   # panel edge borders
+TEXT_PRIMARY  = "#e8e8e8"
+TEXT_SECONDARY= "#aaaaaa"
+TEXT_MUTED    = "#888888"
+TEXT_DIM      = "#777777"
+TEXT_WHITE    = "#ffffff"
 
 
-def apply_style(app, theme='dark'):
-    """Apply application-wide styling
-    
-    Args:
-        app: QApplication instance
-        theme: 'dark' or 'light'
-    """
-    logger.info(f"Applying {theme} theme")
-    
-    if theme.lower() == 'dark':
-        _apply_dark_theme(app)
-    else:
-        _apply_light_theme(app)
-    
-    # Apply stylesheet
-    app.setStyleSheet(_get_stylesheet(theme))
+STYLESHEET = f"""
+/* ── global ───────────────────────────────────────────────────────────────── */
+QWidget {{
+    background-color: {BG_APP};
+    color: {TEXT_PRIMARY};
+    font-family: "Inter", "PingFang SC", "Helvetica Neue", sans-serif;
+    font-size: 13px;
+    border: none;
+    outline: none;
+}}
+
+QScrollArea, QScrollArea > QWidget > QWidget {{
+    background-color: transparent;
+    border: none;
+}}
+
+/* ── scrollbar ────────────────────────────────────────────────────────────── */
+QScrollBar:vertical {{
+    background: {BG_PANEL};
+    width: 6px;
+    margin: 0;
+}}
+QScrollBar::handle:vertical {{
+    background: #444444;
+    border-radius: 3px;
+    min-height: 20px;
+}}
+QScrollBar::handle:vertical:hover {{ background: #555555; }}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+QScrollBar:horizontal {{ height: 0; }}
+
+/* ── top bar ──────────────────────────────────────────────────────────────── */
+#topBar {{
+    background-color: {BG_TOPBAR};
+    border-bottom: 1px solid {BORDER};
+}}
+
+/* ── logo text ────────────────────────────────────────────────────────────── */
+#logoText {{
+    color: {TEXT_WHITE};
+    font-size: 15px;
+    font-weight: 700;
+}}
+
+/* ── mode switch ──────────────────────────────────────────────────────────── */
+#modeSwitch {{
+    background-color: #383838;
+    border-radius: 6px;
+    padding: 2px;
+}}
+#modeBtnActive {{
+    background-color: {BG_ITEM};
+    border-radius: 4px;
+    color: {TEXT_WHITE};
+    font-size: 12px;
+    font-weight: 500;
+    padding: 4px 12px;
+}}
+#modeBtnInactive {{
+    background-color: transparent;
+    color: {TEXT_MUTED};
+    font-size: 12px;
+    padding: 4px 12px;
+}}
+#modeBtnInactive:hover {{ color: {TEXT_PRIMARY}; }}
+
+/* ── nav tabs ─────────────────────────────────────────────────────────────── */
+#navTabActive {{
+    color: {PRIMARY};
+    font-size: 13px;
+    font-weight: 500;
+    border-bottom: 2px solid {PRIMARY};
+    padding: 0 12px;
+    background: transparent;
+}}
+#navTabInactive {{
+    color: {TEXT_MUTED};
+    font-size: 13px;
+    background: transparent;
+    padding: 0 12px;
+    border-bottom: 2px solid transparent;
+}}
+#navTabInactive:hover {{ color: {TEXT_PRIMARY}; }}
+
+/* ── search box ───────────────────────────────────────────────────────────── */
+#searchBox {{
+    background-color: {BG_ITEM};
+    border-radius: 8px;
+    color: {TEXT_DIM};
+    font-size: 12px;
+    padding: 0 10px;
+    height: 32px;
+}}
+#searchBox:focus {{
+    border: 1px solid {PRIMARY};
+    color: {TEXT_PRIMARY};
+}}
+
+/* ── import button ────────────────────────────────────────────────────────── */
+#importBtn {{
+    background-color: {PRIMARY};
+    color: {TEXT_WHITE};
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 6px 14px;
+}}
+#importBtn:hover {{ background-color: {PRIMARY_HOVER}; }}
+#importBtn:pressed {{ background-color: #2855cc; }}
+
+/* ── sidebar ──────────────────────────────────────────────────────────────── */
+#sidebar {{
+    background-color: {BG_PANEL};
+    border-right: 1px solid {BORDER_PANEL};
+}}
+
+#sideSection {{
+    color: {TEXT_MUTED};
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    padding: 4px 8px 2px 8px;
+    background: transparent;
+}}
+
+#sideItemActive {{
+    background-color: {BG_ACTIVE};
+    border-radius: 6px;
+    padding: 6px 8px;
+}}
+#sideItemActive:hover {{ background-color: #1d3870; }}
+
+#sideItemInactive {{
+    background-color: transparent;
+    border-radius: 6px;
+    padding: 6px 8px;
+}}
+#sideItemInactive:hover {{ background-color: #252525; }}
+
+#sideItemTextActive {{
+    color: {PRIMARY};
+    font-size: 13px;
+    font-weight: 500;
+    background: transparent;
+}}
+#sideItemTextInactive {{
+    color: {TEXT_SECONDARY};
+    font-size: 13px;
+    background: transparent;
+}}
+#sideItemCount {{
+    color: {TEXT_MUTED};
+    font-size: 11px;
+    background: transparent;
+}}
+
+/* ── grid toolbar ─────────────────────────────────────────────────────────── */
+#gridToolbar {{
+    background-color: {BG_PANEL};
+    border-bottom: 1px solid {BORDER_PANEL};
+}}
+#gridInfo {{
+    color: {TEXT_PRIMARY};
+    font-size: 13px;
+    font-weight: 500;
+    background: transparent;
+}}
+#toolChip {{
+    background-color: {BG_ITEM};
+    border-radius: 6px;
+    color: {TEXT_SECONDARY};
+    font-size: 12px;
+    padding: 4px 10px;
+}}
+#toolChip:hover {{ background-color: #363636; }}
+
+/* ── thumbnail grid ───────────────────────────────────────────────────────── */
+#gridArea {{ background-color: {BG_APP}; }}
+#thumbName {{
+    color: {TEXT_SECONDARY};
+    font-size: 11px;
+    background: transparent;
+}}
+
+/* ── info panel ───────────────────────────────────────────────────────────── */
+#infoPanel {{
+    background-color: {BG_PANEL};
+    border-left: 1px solid {BORDER_PANEL};
+}}
+#infoTitle {{
+    color: {TEXT_PRIMARY};
+    font-size: 14px;
+    font-weight: 600;
+    background: transparent;
+}}
+#infoLabel {{
+    color: {TEXT_MUTED};
+    font-size: 12px;
+    background: transparent;
+}}
+#infoValue {{
+    color: {TEXT_PRIMARY};
+    font-size: 12px;
+    font-weight: 500;
+    background: transparent;
+}}
+#infoActTitle {{
+    color: {TEXT_PRIMARY};
+    font-size: 13px;
+    font-weight: 600;
+    background: transparent;
+}}
+
+/* ── action buttons ───────────────────────────────────────────────────────── */
+#actBtnPrimary {{
+    background-color: {PRIMARY};
+    color: {TEXT_WHITE};
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 8px 0;
+}}
+#actBtnPrimary:hover {{ background-color: {PRIMARY_HOVER}; }}
+#actBtnPrimary:pressed {{ background-color: #2855cc; }}
+
+#actBtnSecondary {{
+    background-color: {BG_PANEL};
+    color: {TEXT_PRIMARY};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    font-size: 13px;
+    padding: 8px 0;
+}}
+#actBtnSecondary:hover {{ background-color: #252525; }}
+#actBtnSecondary:pressed {{ background-color: #2a2a2a; }}
+
+/* ── divider line ─────────────────────────────────────────────────────────── */
+#divider {{
+    background-color: {BORDER};
+    max-height: 1px;
+    min-height: 1px;
+}}
+#dividerV {{
+    background-color: {BORDER};
+    max-width: 1px;
+    min-width: 1px;
+}}
+"""
 
 
-def _apply_dark_theme(app):
-    """Apply dark theme palette"""
+def apply_dark_theme(app: QApplication) -> None:
+    """Apply palette + stylesheet to *app*."""
     palette = QPalette()
-    
-    # Set window and base colors
-    palette.setColor(QPalette.ColorRole.Window, QColor(DARK_PALETTE['dark']))
-    palette.setColor(QPalette.ColorRole.WindowText, QColor(DARK_PALETTE['light']))
-    palette.setColor(QPalette.ColorRole.Base, QColor(DARK_PALETTE['dark_medium']))
-    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(DARK_PALETTE['dark_light']))
-    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(DARK_PALETTE['dark']))
-    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(DARK_PALETTE['light']))
-    
-    # Set text colors
-    palette.setColor(QPalette.ColorRole.Text, QColor(DARK_PALETTE['light']))
-    palette.setColor(QPalette.ColorRole.Button, QColor(DARK_PALETTE['dark_medium']))
-    palette.setColor(QPalette.ColorRole.ButtonText, QColor(DARK_PALETTE['light']))
-    palette.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
-    
-    # Set highlight colors
-    palette.setColor(QPalette.ColorRole.Highlight, QColor(DARK_PALETTE['primary']))
-    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(DARK_PALETTE['light']))
-    
-    # Set disabled colors
-    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(DARK_PALETTE['gray_500']))
-    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(DARK_PALETTE['gray_500']))
-    
-    # Apply palette
+    palette.setColor(QPalette.ColorRole.Window,          QColor(BG_APP))
+    palette.setColor(QPalette.ColorRole.WindowText,      QColor(TEXT_PRIMARY))
+    palette.setColor(QPalette.ColorRole.Base,            QColor(BG_PANEL))
+    palette.setColor(QPalette.ColorRole.AlternateBase,   QColor(BG_TOPBAR))
+    palette.setColor(QPalette.ColorRole.Text,            QColor(TEXT_PRIMARY))
+    palette.setColor(QPalette.ColorRole.Button,          QColor(BG_ITEM))
+    palette.setColor(QPalette.ColorRole.ButtonText,      QColor(TEXT_PRIMARY))
+    palette.setColor(QPalette.ColorRole.Highlight,       QColor(PRIMARY))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(TEXT_WHITE))
     app.setPalette(palette)
-
-
-def _apply_light_theme(app):
-    """Apply light theme palette"""
-    palette = QPalette()
-    
-    # Set window and base colors
-    palette.setColor(QPalette.ColorRole.Window, QColor(LIGHT_PALETTE['light']))
-    palette.setColor(QPalette.ColorRole.WindowText, QColor(LIGHT_PALETTE['dark']))
-    palette.setColor(QPalette.ColorRole.Base, QColor(LIGHT_PALETTE['gray_100']))
-    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(LIGHT_PALETTE['gray_200']))
-    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(LIGHT_PALETTE['light']))
-    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(LIGHT_PALETTE['dark']))
-    
-    # Set text colors
-    palette.setColor(QPalette.ColorRole.Text, QColor(LIGHT_PALETTE['dark']))
-    palette.setColor(QPalette.ColorRole.Button, QColor(LIGHT_PALETTE['gray_200']))
-    palette.setColor(QPalette.ColorRole.ButtonText, QColor(LIGHT_PALETTE['dark']))
-    palette.setColor(QPalette.ColorRole.BrightText, Qt.GlobalColor.red)
-    
-    # Set highlight colors
-    palette.setColor(QPalette.ColorRole.Highlight, QColor(LIGHT_PALETTE['primary']))
-    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(LIGHT_PALETTE['light']))
-    
-    # Set disabled colors
-    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(LIGHT_PALETTE['gray_400']))
-    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(LIGHT_PALETTE['gray_400']))
-    
-    # Apply palette
-    app.setPalette(palette)
-
-
-def _get_stylesheet(theme):
-    """Get the stylesheet for the given theme
-    
-    Args:
-        theme: 'dark' or 'light'
-    
-    Returns:
-        str: CSS stylesheet
-    """
-    palette = DARK_PALETTE if theme.lower() == 'dark' else LIGHT_PALETTE
-    
-    return f"""
-    /* QWidget */
-    QWidget {{
-        font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
-        font-size: 10pt;
-    }}
-    
-    /* QMainWindow */
-    QMainWindow {{
-        background-color: {palette['dark']};
-    }}
-    
-    /* QMenuBar */
-    QMenuBar {{
-        background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                                  stop:0 {palette['dark']}, 
-                                  stop:1 {palette['dark_medium']});
-        color: {palette['light']};
-        padding: 4px;
-        spacing: 2px;
-    }}
-    
-    QMenuBar::item {{
-        background: transparent;
-        padding: 6px 12px;
-        border-radius: 4px;
-    }}
-    
-    QMenuBar::item:selected {{
-        background-color: rgba(255, 255, 255, 0.1);
-    }}
-    
-    QMenuBar::item:pressed {{
-        background-color: rgba(255, 255, 255, 0.15);
-    }}
-    
-    /* QMenu */
-    QMenu {{
-        background-color: {palette['dark_medium']};
-        color: {palette['light']};
-        border: 1px solid {palette['dark_light']};
-        border-radius: 4px;
-        padding: 4px;
-    }}
-    
-    QMenu::item {{
-        padding: 6px 16px 6px 24px;
-        border-radius: 2px;
-    }}
-    
-    QMenu::item:selected {{
-        background-color: rgba(255, 255, 255, 0.1);
-    }}
-    
-    QMenu::separator {{
-        height: 1px;
-        background-color: {palette['dark_light']};
-        margin: 4px 8px;
-    }}
-    
-    /* QToolBar */
-    QToolBar {{
-        background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                                  stop:0 {palette['dark_medium']}, 
-                                  stop:1 {palette['dark_light']});
-        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-        spacing: 6px;
-        padding: 6px;
-    }}
-    
-    QToolBar::separator {{
-        width: 1px;
-        background-color: rgba(255, 255, 255, 0.1);
-        margin: 0 6px;
-    }}
-    
-    QToolButton {{
-        background-color: rgba(255, 255, 255, 0.08);
-        color: {palette['light']};
-        border-radius: 6px;
-        padding: 4px;
-        margin: 0 1px;
-    }}
-    
-    QToolButton:hover {{
-        background-color: rgba(255, 255, 255, 0.15);
-    }}
-    
-    QToolButton:pressed {{
-        background-color: rgba(255, 255, 255, 0.2);
-    }}
-    
-    QToolButton:checked {{
-        background-color: {palette['primary']};
-    }}
-    
-    /* QStatusBar */
-    QStatusBar {{
-        background-color: {palette['dark']};
-        color: {palette['gray_400']};
-        border-top: 1px solid {palette['dark_medium']};
-    }}
-    
-    QStatusBar::item {{
-        border: none;
-    }}
-    
-    /* QSplitter */
-    QSplitter::handle {{
-        background-color: {palette['dark_medium']};
-        width: 1px;
-        height: 1px;
-    }}
-    
-    QSplitter::handle:hover {{
-        background-color: {palette['primary']};
-    }}
-    
-    /* QScrollBar */
-    QScrollBar:vertical {{
-        border: none;
-        background-color: {palette['dark_medium']};
-        width: 10px;
-        margin: 0px;
-    }}
-    
-    QScrollBar::handle:vertical {{
-        background-color: {palette['dark_light']};
-        border-radius: 5px;
-        min-height: 20px;
-    }}
-    
-    QScrollBar::handle:vertical:hover {{
-        background-color: {palette['gray_500']};
-    }}
-    
-    QScrollBar::add-line:vertical,
-    QScrollBar::sub-line:vertical {{
-        height: 0px;
-    }}
-    
-    QScrollBar:horizontal {{
-        border: none;
-        background-color: {palette['dark_medium']};
-        height: 10px;
-        margin: 0px;
-    }}
-    
-    QScrollBar::handle:horizontal {{
-        background-color: {palette['dark_light']};
-        border-radius: 5px;
-        min-width: 20px;
-    }}
-    
-    QScrollBar::handle:horizontal:hover {{
-        background-color: {palette['gray_500']};
-    }}
-    
-    QScrollBar::add-line:horizontal,
-    QScrollBar::sub-line:horizontal {{
-        width: 0px;
-    }}
-    
-    /* QTabWidget and QTabBar */
-    QTabWidget::pane {{
-        border: 1px solid {palette['dark_light']};
-        background-color: {palette['dark_medium']};
-        border-radius: 4px;
-    }}
-    
-    QTabBar::tab {{
-        background-color: {palette['dark']};
-        color: {palette['gray_400']};
-        padding: 8px 16px;
-        border-top-left-radius: 4px;
-        border-top-right-radius: 4px;
-    }}
-    
-    QTabBar::tab:selected {{
-        background-color: {palette['dark_medium']};
-        color: {palette['light']};
-    }}
-    
-    QTabBar::tab:hover {{
-        background-color: {palette['dark_light']};
-    }}
-    
-    /* QPushButton */
-    QPushButton {{
-        background-color: {palette['primary']};
-        color: {palette['light']};
-        border: none;
-        border-radius: 6px;
-        padding: 8px 16px;
-        font-weight: 500;
-    }}
-    
-    QPushButton:hover {{
-        background-color: {palette['primary_light']};
-    }}
-    
-    QPushButton:pressed {{
-        background-color: {palette['primary_dark']};
-    }}
-    
-    QPushButton:disabled {{
-        background-color: {palette['dark_light']};
-        color: {palette['gray_500']};
-    }}
-    
-    /* QComboBox */
-    QComboBox {{
-        background-color: {palette['dark_medium']};
-        color: {palette['light']};
-        border: 1px solid {palette['dark_light']};
-        border-radius: 4px;
-        padding: 6px 12px;
-        min-width: 6em;
-    }}
-    
-    QComboBox:hover {{
-        border: 1px solid {palette['gray_500']};
-    }}
-    
-    QComboBox::drop-down {{
-        subcontrol-origin: padding;
-        subcontrol-position: center right;
-        width: 16px;
-        border-left: none;
-    }}
-    
-    QComboBox QAbstractItemView {{
-        background-color: {palette['dark_medium']};
-        color: {palette['light']};
-        border: 1px solid {palette['dark_light']};
-        selection-background-color: {palette['primary']};
-        selection-color: {palette['light']};
-        outline: none;
-    }}
-    
-    /* QSlider */
-    QSlider::groove:horizontal {{
-        border: none;
-        height: 4px;
-        background-color: {palette['dark_light']};
-        border-radius: 2px;
-    }}
-    
-    QSlider::handle:horizontal {{
-        background-color: {palette['primary']};
-        border: 2px solid {palette['light']};
-        width: 14px;
-        margin: -6px 0;
-        border-radius: 8px;
-    }}
-    
-    QSlider::handle:horizontal:hover {{
-        background-color: {palette['primary_light']};
-    }}
-    
-    /* QLineEdit */
-    QLineEdit {{
-        background-color: {palette['dark_medium']};
-        color: {palette['light']};
-        border: 1px solid {palette['dark_light']};
-        border-radius: 4px;
-        padding: 6px 12px;
-    }}
-    
-    QLineEdit:hover {{
-        border: 1px solid {palette['gray_500']};
-    }}
-    
-    QLineEdit:focus {{
-        border: 1px solid {palette['primary']};
-    }}
-    
-    /* QCheckBox */
-    QCheckBox {{
-        color: {palette['light']};
-        spacing: 8px;
-    }}
-    
-    QCheckBox::indicator {{
-        width: 18px;
-        height: 18px;
-        border-radius: 4px;
-        border: 1px solid {palette['gray_500']};
-    }}
-    
-    QCheckBox::indicator:unchecked {{
-        background-color: {palette['dark_medium']};
-    }}
-    
-    QCheckBox::indicator:checked {{
-        background-color: {palette['primary']};
-        border: 1px solid {palette['primary']};
-    }}
-    
-    /* QRadioButton */
-    QRadioButton {{
-        color: {palette['light']};
-        spacing: 8px;
-    }}
-    
-    QRadioButton::indicator {{
-        width: 18px;
-        height: 18px;
-        border-radius: 9px;
-        border: 1px solid {palette['gray_500']};
-    }}
-    
-    QRadioButton::indicator:unchecked {{
-        background-color: {palette['dark_medium']};
-    }}
-    
-    QRadioButton::indicator:checked {{
-        background-color: {palette['primary']};
-        border: 1px solid {palette['primary']};
-    }}
-    """ 
-
-def get_app_icon():
-    """Get the application icon
-    
-    Returns:
-        QIcon: Application icon
-    """
-    # Create a simple icon for the application
-    pixmap = QPixmap(32, 32)
-    pixmap.fill(QColor('#4361ee'))
-    
-    # Create a painter to draw on the pixmap
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    
-    # Draw a stylized 'TL' for TempusLoom
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QBrush(QColor('#ffffff')))
-    
-    # Draw 'T' shape
-    painter.drawRect(8, 6, 4, 20)
-    painter.drawRect(8, 6, 16, 4)
-    
-    # Draw 'L' shape
-    painter.drawRect(20, 14, 4, 12)
-    painter.drawRect(20, 22, 8, 4)
-    
-    painter.end()
-    
-    return QIcon(pixmap)
-
-def get_menu_icons():
-    """Get a dictionary of icons for menus
-    
-    Returns:
-        dict: Dictionary of QIcon objects
-    """
-    icons = {}
-    
-    # File menu icons
-    icons['new'] = _create_simple_icon('N', '#10b981')
-    icons['open'] = _create_simple_icon('O', '#4361ee')
-    icons['save'] = _create_simple_icon('S', '#4cc9f0')
-    icons['saveas'] = _create_simple_icon('A', '#3a0ca3')
-    icons['export'] = _create_simple_icon('E', '#f72585')
-    icons['print'] = _create_simple_icon('P', '#f59e0b')
-    icons['exit'] = _create_simple_icon('X', '#ef4444')
-    
-    # Edit menu icons
-    icons['undo'] = _create_simple_icon('U', '#4361ee')
-    icons['redo'] = _create_simple_icon('R', '#4361ee')
-    icons['cut'] = _create_simple_icon('X', '#ef4444')
-    icons['copy'] = _create_simple_icon('C', '#4cc9f0')
-    icons['paste'] = _create_simple_icon('V', '#10b981')
-    icons['select_all'] = _create_simple_icon('A', '#4361ee')
-    icons['deselect'] = _create_simple_icon('D', '#f59e0b')
-    icons['preferences'] = _create_simple_icon('P', '#f72585')
-    
-    # View menu icons
-    icons['zoom_in'] = _create_simple_icon('+', '#10b981')
-    icons['zoom_out'] = _create_simple_icon('-', '#10b981')
-    icons['zoom_fit'] = _create_simple_icon('F', '#4cc9f0')
-    icons['zoom_100'] = _create_simple_icon('1', '#4cc9f0')
-    icons['fullscreen'] = _create_simple_icon('F', '#f72585')
-    
-    # Tool icons
-    icons['select'] = _create_simple_icon('S', '#4361ee')
-    icons['crop'] = _create_simple_icon('C', '#4cc9f0')
-    icons['brush'] = _create_simple_icon('B', '#10b981')
-    icons['eraser'] = _create_simple_icon('E', '#f59e0b')
-    icons['text'] = _create_simple_icon('T', '#f72585')
-    icons['transform'] = _create_simple_icon('T', '#3a0ca3')
-    
-    return icons
-
-def _create_simple_icon(letter, color_hex):
-    """Create a simple colored icon with a letter
-    
-    Args:
-        letter: Single letter to display
-        color_hex: Hex color for the background
-    
-    Returns:
-        QIcon: Simple icon
-    """
-    pixmap = QPixmap(16, 16)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    
-    # Draw background circle
-    painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QBrush(QColor(color_hex)))
-    painter.drawEllipse(0, 0, 16, 16)
-    
-    # Draw letter
-    painter.setPen(QPen(QColor('#ffffff')))
-    font = QFont("Arial", 9, QFont.Weight.Bold)
-    painter.setFont(font)
-    painter.drawText(QRect(0, 0, 16, 16), Qt.AlignmentFlag.AlignCenter, letter)
-    
-    painter.end()
-    
-    return QIcon(pixmap) 
+    app.setStyleSheet(STYLESHEET)
