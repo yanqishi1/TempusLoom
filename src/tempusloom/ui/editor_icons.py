@@ -351,6 +351,107 @@ def _draw_folder(p: QPainter, s: int) -> None:
     p.drawRoundedRect(QRectF(m, s * 0.20, s * 0.35, s * 0.16), 2, 2)
 
 
+def _draw_chevron_right(p: QPainter, s: int) -> None:
+    m = s * 0.22
+    cx = s * 0.42
+    p.drawLine(QPointF(cx, m), QPointF(cx + s * 0.22, s / 2))
+    p.drawLine(QPointF(cx + s * 0.22, s / 2), QPointF(cx, s - m))
+
+
+def _draw_rotate_ccw(p: QPainter, s: int) -> None:
+    """Counter-clockwise circular reset arrow."""
+    path = QPainterPath()
+    path.moveTo(s * 0.28, s * 0.22)
+    path.arcTo(QRectF(s * 0.18, s * 0.18, s * 0.64, s * 0.64), 120, 270)
+    p.drawPath(path)
+    # arrowhead at start
+    tip = QPointF(s * 0.28, s * 0.22)
+    p.drawLine(tip, QPointF(s * 0.12, s * 0.24))
+    p.drawLine(tip, QPointF(s * 0.30, s * 0.08))
+
+
+def _draw_sparkles(p: QPainter, s: int) -> None:
+    """Four-point star / sparkle icon."""
+    import math
+    cx, cy = s * 0.50, s * 0.50
+    outer, inner = s * 0.40, s * 0.16
+    pts = []
+    for i in range(8):
+        r = outer if i % 2 == 0 else inner
+        a = math.radians(i * 45 - 90)
+        pts.append(QPointF(cx + r * math.cos(a), cy + r * math.sin(a)))
+    path = QPainterPath()
+    path.moveTo(pts[0])
+    for pt in pts[1:]:
+        path.lineTo(pt)
+    path.closeSubpath()
+    old_brush = p.brush()
+    p.setBrush(QBrush(p.pen().color()))
+    p.drawPath(path)
+    p.setBrush(old_brush)
+
+
+def _draw_crosshair(p: QPainter, s: int) -> None:
+    cx, cy, r, gap = s / 2, s / 2, s * 0.38, s * 0.12
+    p.drawEllipse(QRectF(cx - r, cy - r, 2 * r, 2 * r))
+    m = s * 0.08
+    p.drawLine(QPointF(m, cy), QPointF(cx - gap, cy))
+    p.drawLine(QPointF(cx + gap, cy), QPointF(s - m, cy))
+    p.drawLine(QPointF(cx, m), QPointF(cx, cy - gap))
+    p.drawLine(QPointF(cx, cy + gap), QPointF(cx, s - m))
+
+
+def _draw_trending_up(p: QPainter, s: int) -> None:
+    m = s * 0.15
+    # rising line
+    p.drawLine(QPointF(m, s - m), QPointF(s * 0.42, s * 0.45))
+    p.drawLine(QPointF(s * 0.42, s * 0.45), QPointF(s * 0.62, s * 0.65))
+    p.drawLine(QPointF(s * 0.62, s * 0.65), QPointF(s - m, m))
+    # arrowhead
+    p.drawLine(QPointF(s - m, m), QPointF(s - m, s * 0.38))
+    p.drawLine(QPointF(s - m, m), QPointF(s * 0.62, m))
+
+
+def _draw_sliders_horizontal(p: QPainter, s: int) -> None:
+    m = s * 0.12
+    for y, hx in ((s * 0.30, s * 0.35), (s * 0.50, s * 0.60), (s * 0.70, s * 0.45)):
+        p.drawLine(QPointF(m, y), QPointF(s - m, y))
+        r = s * 0.07
+        p.setBrush(QBrush(p.pen().color()))
+        p.drawEllipse(QRectF(hx - r, y - r, 2 * r, 2 * r))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+
+def _draw_layers(p: QPainter, s: int) -> None:
+    m = s * 0.12
+    for i, y in enumerate((s * 0.28, s * 0.50, s * 0.72)):
+        w = s - 2 * m - i * s * 0.06
+        x = m + i * s * 0.03
+        p.drawRoundedRect(QRectF(x, y - s * 0.08, w, s * 0.14), 2, 2)
+
+
+def _draw_clock(p: QPainter, s: int) -> None:
+    cx, cy, r = s / 2, s / 2, s * 0.40
+    p.drawEllipse(QRectF(cx - r, cy - r, 2 * r, 2 * r))
+    p.drawLine(QPointF(cx, cy), QPointF(cx, cy - r * 0.60))
+    p.drawLine(QPointF(cx, cy), QPointF(cx + r * 0.45, cy + r * 0.30))
+
+
+def _draw_circle_half_stroke(p: QPainter, s: int) -> None:
+    import math as _math
+    cx, cy, r = s / 2, s / 2, s * 0.38
+    p.drawEllipse(QRectF(cx - r, cy - r, 2 * r, 2 * r))
+    # filled left half
+    half = QPainterPath()
+    half.moveTo(cx, cy - r)
+    half.arcTo(QRectF(cx - r, cy - r, 2 * r, 2 * r), 90, 180)
+    half.closeSubpath()
+    old_brush = p.brush()
+    p.setBrush(QBrush(p.pen().color()))
+    p.drawPath(half)
+    p.setBrush(old_brush)
+
+
 # ── dispatch table ─────────────────────────────────────────────────────────────
 _DRAW = {
     "mouse-pointer":   _draw_mouse_pointer,
@@ -382,11 +483,21 @@ _DRAW = {
     "more-horizontal": _draw_more_horizontal,
     "grid-3x3":        _draw_grid,
     "ruler":           _draw_ruler,
-    "chevron-down":    _draw_chevron_down,
-    "user":            _draw_user,
-    "minus":           _draw_minus,
-    "search":          _draw_search,
-    "upload":          _draw_upload,
-    "tag":             _draw_tag,
-    "folder":          _draw_folder,
+    "chevron-down":         _draw_chevron_down,
+    "chevron-right":        _draw_chevron_right,
+    "user":                 _draw_user,
+    "minus":                _draw_minus,
+    "search":               _draw_search,
+    "upload":               _draw_upload,
+    "tag":                  _draw_tag,
+    "folder":               _draw_folder,
+    "rotate-ccw":           _draw_rotate_ccw,
+    "sparkles":             _draw_sparkles,
+    "star":                 _draw_sparkles,
+    "crosshair":            _draw_crosshair,
+    "trending-up":          _draw_trending_up,
+    "sliders-horizontal":   _draw_sliders_horizontal,
+    "layers":               _draw_layers,
+    "clock":                _draw_clock,
+    "circle-half-stroke":   _draw_circle_half_stroke,
 }

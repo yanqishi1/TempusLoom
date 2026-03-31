@@ -898,41 +898,63 @@ class _ClickableHeader(QWidget):
 
 
 class _HistogramCanvas(QWidget):
-    """Paints a simple R/G/B Gaussian histogram as a visual placeholder."""
-    _H = 72
+    """Paints a realistic R/G/B stacked-bar histogram."""
+    _H = 96
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFixedHeight(self._H)
-        self.setStyleSheet("background:transparent;")
+        self.setStyleSheet(
+            f"background:{C_BG_ITEM}; border-radius:6px;"
+        )
+        # pre-bake pseudo-histogram data (128 bins, realistic distribution)
+        import random
+        rng = random.Random(42)
+        bins = 128
 
-    @staticmethod
-    def _gauss(x: float, mu: float, sigma: float) -> float:
-        return math.exp(-0.5 * ((x - mu) / sigma) ** 2)
+        def _make_channel(peak1, peak2, spread):
+            data = []
+            for i in range(bins):
+                t = i / (bins - 1)
+                v = (math.exp(-0.5 * ((t - peak1) / spread) ** 2) * 0.7 +
+                     math.exp(-0.5 * ((t - peak2) / spread) ** 2) * 0.4 +
+                     rng.uniform(0, 0.08))
+                data.append(v)
+            # normalise
+            mx = max(data) or 1.0
+            return [x / mx for x in data]
+
+        self._r = _make_channel(0.25, 0.72, 0.12)
+        self._g = _make_channel(0.35, 0.68, 0.13)
+        self._b = _make_channel(0.20, 0.60, 0.14)
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         W, H = self.width(), self.height()
+        pad_t, pad_b = 6, 4
+        draw_h = H - pad_t - pad_b
+        bins = len(self._r)
 
         channels = [
-            ("#ff4444", 0.38, 0.20),
-            ("#44cc44", 0.50, 0.22),
-            ("#4488ff", 0.55, 0.18),
+            (self._r, QColor(255,  80,  80, 100)),
+            (self._g, QColor( 60, 200,  80, 100)),
+            (self._b, QColor( 60, 130, 255, 110)),
         ]
-        for hex_color, mu, sigma in channels:
-            col = QColor(hex_color)
-            col.setAlphaF(0.45)
+        for data, col in channels:
             path = QPainterPath()
-            path.moveTo(0, H)
-            for i in range(W):
-                t = i / max(W - 1, 1)
-                v = self._gauss(t, mu, sigma)
-                y = H - v * (H - 6)
-                path.lineTo(i, y)
-            path.lineTo(W, H)
+            path.moveTo(0, H - pad_b)
+            for i, v in enumerate(data):
+                x = i / (bins - 1) * W
+                y = pad_t + (1.0 - v) * draw_h
+                path.lineTo(x, y)
+            path.lineTo(W, H - pad_b)
             path.closeSubpath()
             p.fillPath(path, QBrush(col))
+
+        # subtle top border line
+        p.setPen(QPen(QColor(C_BORDER), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
         p.end()
 
 
@@ -1025,7 +1047,7 @@ class AdjustSection(QWidget):
     ----------
     title:    section label shown in the header row
     expanded: whether content starts visible
-    badge:    optional short badge string ("New", "Free", …)
+    badge:    optional short badge string ("", "", …)
     """
 
     def __init__(self, title: str, *,
@@ -1045,10 +1067,11 @@ class AdjustSection(QWidget):
         hdr.setFixedHeight(36)
         hdr.setCursor(Qt.CursorShape.PointingHandCursor)
         hdr.setStyleSheet(
-            f"background:{C_BG_PANEL}; border-radius:6px;"
+            "background:transparent; border:none;"
+            "_ClickableHeader:hover{background:rgba(255,255,255,0.03);}"
         )
         hdr_lo = QHBoxLayout(hdr)
-        hdr_lo.setContentsMargins(10, 0, 8, 0)
+        hdr_lo.setContentsMargins(12, 0, 8, 0)
         hdr_lo.setSpacing(6)
 
         # collapse arrow
@@ -1066,7 +1089,7 @@ class AdjustSection(QWidget):
         title_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         hdr_lo.addWidget(title_lbl)
 
-        # optional badge (New / Free)
+        # optional badge
         if badge:
             badge_lbl = QLabel(badge)
             badge_lbl.setStyleSheet(
@@ -1078,18 +1101,31 @@ class AdjustSection(QWidget):
 
         hdr_lo.addStretch()
 
-        # reset icon button
-        reset_btn = QPushButton()
-        reset_btn.setFixedSize(22, 22)
-        reset_btn.setToolTip("重置")
-        reset_btn.setIcon(_qicon("rotate-ccw", 11, C_TEXT_4))
-        reset_btn.setIconSize(QSize(11, 11))
-        reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        reset_btn.setStyleSheet(
+        # ── right icon buttons ────────────────────────────────────────────────
+        _btn_ss = (
             "QPushButton{background:transparent; border:none;}"
             "QPushButton:hover{background:#333333; border-radius:4px;}"
         )
+
+        reset_btn = QPushButton()
+        reset_btn.setFixedSize(22, 22)
+        reset_btn.setToolTip("重置")
+        reset_btn.setIcon(_qicon("rotate-ccw", 12, C_TEXT_4))
+        reset_btn.setIconSize(QSize(12, 12))
+        reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        reset_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        reset_btn.setStyleSheet(_btn_ss)
         hdr_lo.addWidget(reset_btn)
+
+        pin_btn = QPushButton()
+        pin_btn.setFixedSize(22, 22)
+        pin_btn.setToolTip("智能调整")
+        pin_btn.setIcon(_qicon("sparkles", 12, C_TEXT_4))
+        pin_btn.setIconSize(QSize(12, 12))
+        pin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        pin_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        pin_btn.setStyleSheet(_btn_ss)
+        hdr_lo.addWidget(pin_btn)
 
         hdr.clicked.connect(self._toggle)
         root_lo.addWidget(hdr)
@@ -1098,7 +1134,7 @@ class AdjustSection(QWidget):
         self._content = QWidget()
         self._content.setStyleSheet("background:transparent;")
         self.content_lo = QVBoxLayout(self._content)
-        self.content_lo.setContentsMargins(4, 8, 4, 8)
+        self.content_lo.setContentsMargins(12, 4, 12, 12)
         self.content_lo.setSpacing(10)
         root_lo.addWidget(self._content)
 
@@ -1354,15 +1390,15 @@ class ColorWheelWidget(QWidget):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class RightPanel(QWidget):
-    """280 px right panel: panel tabs + layers content."""
+    """320 px right panel: panel tabs + layers content."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedWidth(280)
+        self.setFixedWidth(320)
         self.setStyleSheet(
-            f"background:{C_BG_RIGHT}; border-left:1px solid {C_BORDER_P};"
+            f"background:{C_BG_RIGHT};"
         )
-        self._active_tab = "图层"
+        self._active_tab = "调整"
         self._active_layer = 0
         self._layer_rows: list[LayerRow] = []
         self._build()
@@ -1392,6 +1428,8 @@ class RightPanel(QWidget):
                   self._portrait_widget, self._mask_widget):
             self._stack.addWidget(w)
 
+        # show 调整 (index 1) by default
+        self._stack.setCurrentIndex(1)
         lo.addWidget(self._stack, 1)
 
     # ── tab bar ───────────────────────────────────────────────────────────────
@@ -1407,53 +1445,30 @@ class RightPanel(QWidget):
     ]
 
     def _build_tab_bar(self) -> QWidget:
-        # taller bar: icon (18 px) + gap (4 px) + text (11 px) + top/bottom padding
+        # Flat underline-style tab bar (36 px height)
         bar = QWidget()
-        bar.setFixedHeight(68)
+        bar.setFixedHeight(36)
         bar.setStyleSheet(
             f"background:{C_BG_RIGHT}; border-bottom:1px solid {C_BORDER_P};"
         )
         lo = QHBoxLayout(bar)
-        lo.setContentsMargins(4, 6, 4, 6)
-        lo.setSpacing(2)
+        lo.setContentsMargins(4, 0, 4, 0)
+        lo.setSpacing(0)
 
         self._tab_buttons: dict[str, QPushButton] = {}
         for tab, icon_name in self._TAB_DEFS:
-            btn = QPushButton()
+            btn = QPushButton(tab)
             btn.setCheckable(True)
-            # Expanding so all tabs share width equally
             btn.setSizePolicy(
                 QSizePolicy.Policy.Expanding,
                 QSizePolicy.Policy.Preferred,
             )
-            btn.setFixedHeight(56)
+            btn.setFixedHeight(36)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.clicked.connect(lambda _, t=tab: self._on_tab(t))
 
-            # inner: icon on top, label below
-            inner = QVBoxLayout(btn)
-            inner.setContentsMargins(0, 7, 0, 6)
-            inner.setSpacing(3)
-
-            icon_lbl = QLabel()
-            icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            icon_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            icon_lbl.setStyleSheet("background:transparent; border:none;")
-
-            text_lbl = QLabel(tab)
-            text_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            text_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            text_lbl.setStyleSheet(
-                f"background:transparent; border:none; font-size:11px;"
-            )
-
-            inner.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignHCenter)
-            inner.addWidget(text_lbl, 0, Qt.AlignmentFlag.AlignHCenter)
-
-            # stash refs for _refresh_tabs
-            btn._tab_icon_lbl  = icon_lbl   # type: ignore[attr-defined]
-            btn._tab_text_lbl  = text_lbl   # type: ignore[attr-defined]
+            # stash icon name for potential future use
             btn._tab_icon_name = icon_name  # type: ignore[attr-defined]
 
             self._tab_buttons[tab] = btn
@@ -1465,36 +1480,34 @@ class RightPanel(QWidget):
     def _on_tab(self, tab: str) -> None:
         self._active_tab = tab
         self._refresh_tabs()
-        tab_order = ["图层", "调整", "AI", "历史", "人像", "蒙板"]
-        self._stack.setCurrentIndex(tab_order.index(tab))
+        tab_order = ["调整", "图层", "AI", "历史", "人像", "蒙板"]
+        idx = tab_order.index(tab) if tab in tab_order else 0
+        # stack order: adjust(0), layers(1), ai(2), history(3), portrait(4), mask(5)
+        stack_map = {"调整": 1, "图层": 0, "AI": 2, "历史": 3, "人像": 4, "蒙板": 5}
+        self._stack.setCurrentIndex(stack_map.get(tab, 0))
 
     def _refresh_tabs(self) -> None:
         for tab, btn in self._tab_buttons.items():
             active = (tab == self._active_tab)
             btn.setChecked(active)
-
-            icon_color = C_PRIMARY  if active else C_TEXT_4
-            text_color = C_TEXT_1   if active else C_TEXT_4
-            bg         = C_BG_ACTIVE if active else "transparent"
-            hover_bg   = "#1d3870"   if active else C_BG_ITEM
-
-            # update icon pixmap colour
-            btn._tab_icon_lbl.setPixmap(          # type: ignore[attr-defined]
-                icon_pixmap(btn._tab_icon_name, 18, icon_color)  # type: ignore[attr-defined]
-            )
-            btn._tab_icon_lbl.setFixedSize(18, 18)  # type: ignore[attr-defined]
-
-            # update label colour
-            btn._tab_text_lbl.setStyleSheet(      # type: ignore[attr-defined]
-                f"color:{text_color}; font-size:11px;"
-                "background:transparent; border:none;"
-            )
-
-            # update button background / hover
-            btn.setStyleSheet(
-                f"QPushButton{{background:{bg}; border:none; border-radius:8px;}}"
-                f"QPushButton:hover{{background:{hover_bg};}}"
-            )
+            text_color = C_PRIMARY if active else C_TEXT_3
+            # Active tab: blue text + blue 2px bottom border; inactive: transparent
+            if active:
+                btn.setStyleSheet(
+                    f"QPushButton{{background:transparent; border:none;"
+                    f"border-bottom:2px solid {C_PRIMARY};"
+                    f"color:{text_color}; font-size:12px; font-weight:500;"
+                    f"padding:0 2px;}}"
+                    f"QPushButton:hover{{color:{C_PRIMARY};}}"
+                )
+            else:
+                btn.setStyleSheet(
+                    f"QPushButton{{background:transparent; border:none;"
+                    f"border-bottom:2px solid transparent;"
+                    f"color:{text_color}; font-size:12px;"
+                    f"padding:0 2px;}}"
+                    f"QPushButton:hover{{color:{C_TEXT_1}; border-bottom:2px solid {C_BORDER};}}"
+                )
 
     # ── layers panel content ──────────────────────────────────────────────────
     def _build_layers_content(self) -> QWidget:
@@ -1652,38 +1665,45 @@ class RightPanel(QWidget):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet(
             "QScrollArea{background:transparent; border:none;}"
-            f"QScrollBar:vertical{{background:{C_BG_RIGHT}; width:4px; border-radius:2px;}}"
-            f"QScrollBar::handle:vertical{{background:{C_BORDER}; border-radius:2px;}}"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical{height:0;}"
+            "QScrollArea > QWidget{background:transparent; border:none;}"
+            "QScrollBar:vertical{background:transparent; width:4px; border:none; border-radius:2px;}"
+            "QScrollBar::groove:vertical{background:transparent; border:none; width:4px;}"
+            f"QScrollBar::handle:vertical{{background:{C_BORDER}; border:none; border-radius:2px; min-height:20px;}}"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical{height:0; border:none;}"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical{background:transparent; border:none;}"
         )
 
         inner = QWidget()
         inner.setStyleSheet("background:transparent;")
         lo = QVBoxLayout(inner)
-        lo.setContentsMargins(8, 8, 8, 16)
-        lo.setSpacing(4)
+        lo.setContentsMargins(0, 8, 0, 16)
+        lo.setSpacing(0)
 
         # histogram + EXIF bar
-        lo.addWidget(self._build_histogram_bar())
+        hist_wrap = QWidget()
+        hist_lo = QVBoxLayout(hist_wrap)
+        hist_lo.setContentsMargins(8, 0, 8, 0)
+        hist_lo.setSpacing(0)
+        hist_lo.addWidget(self._build_histogram_bar())
+        lo.addWidget(hist_wrap)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setFixedHeight(1)
         sep.setStyleSheet(f"background:{C_BORDER_P}; border:none;")
         lo.addWidget(sep)
-        lo.addSpacing(4)
 
         # collapsible sections
         _SECTIONS = [
-            ("白平衡",    True,  "Free"),
-            ("影调",      False, "Free"),
-            ("色阶",      False, "New"),
-            ("曲线",      False, "Free"),
-            ("HSL",       False, "Free"),
-            ("色彩编辑器", False, "Free"),
-            ("颜色分级",  False, "Free"),
-            ("可选颜色",  False, "New"),
-            ("细节",      False, "Free"),
+            ("白平衡",    True,  ""),
+            ("影调",      False, ""),
+            ("色阶",      False, ""),
+            ("曲线",      False, ""),
+            ("HSL",       False, ""),
+            ("色彩编辑器", False, ""),
+            ("颜色分级",  False, ""),
+            ("可选颜色",  False, ""),
+            ("细节",      False, ""),
             ("镜头",      False, ""),
             ("透视矫正",  False, ""),
             ("颜色校准",  False, ""),
@@ -1701,7 +1721,13 @@ class RightPanel(QWidget):
             "透视矫正": self._build_perspective_content,
             "颜色校准": self._build_color_calibration_content,
         }
-        for title, expanded, badge in _SECTIONS:
+        for i, (title, expanded, badge) in enumerate(_SECTIONS):
+            if i > 0:
+                sep = QFrame()
+                sep.setFrameShape(QFrame.Shape.HLine)
+                sep.setFixedHeight(1)
+                sep.setStyleSheet(f"background:{C_BORDER_P}; border:none;")
+                lo.addWidget(sep)
             sec = AdjustSection(title, expanded=expanded, badge=badge)
             builder = _BUILDERS.get(title)
             if builder:
@@ -1808,6 +1834,472 @@ class RightPanel(QWidget):
 
         lo.addWidget(row)
 
+    # ── 影调 section ──────────────────────────────────────────────────────────
+
+    def _build_tone_content(self, lo: QVBoxLayout) -> None:
+        """Tone section: 曝光/对比度/亮度/高光/阴影/白色/黑色."""
+        _SLIDERS = [
+            ("曝光",  0,   "#1a1a1a", "#ffffff", -200, 200),
+            ("对比度", 0,  "#1a1a1a", "#ffffff", -100, 100),
+            ("亮度",  0,   "#1a1a1a", "#f0f0f0", -100, 100),
+            ("高光",  0,   "#888888", "#ffffff", -100, 100),
+            ("阴影",  0,   "#000000", "#888888", -100, 100),
+            ("白色",  0,   "#666666", "#ffffff", -100, 100),
+            ("黑色",  0,   "#000000", "#555555", -100, 100),
+        ]
+        for label, val, lc, rc, mn, mx in _SLIDERS:
+            self._add_gradient_slider_row(lo, label, val, lc, rc, mn, mx, 0)
+
+    # ── 色阶 section ──────────────────────────────────────────────────────────
+
+    def _build_levels_content(self, lo: QVBoxLayout) -> None:
+        """Levels section: input/output black-white point sliders."""
+        lo.addWidget(_lbl("输入色阶", C_TEXT_3, 11))
+        self._add_gradient_slider_row(
+            lo, "暗部", 0, "#000000", "#ffffff", 0, 255, 0
+        )
+        self._add_gradient_slider_row(
+            lo, "亮部", 255, "#000000", "#ffffff", 0, 255, 255
+        )
+        lo.addSpacing(4)
+        lo.addWidget(_lbl("输出色阶", C_TEXT_3, 11))
+        self._add_gradient_slider_row(
+            lo, "暗部", 0, "#000000", "#ffffff", 0, 255, 0
+        )
+        self._add_gradient_slider_row(
+            lo, "亮部", 255, "#000000", "#ffffff", 0, 255, 255
+        )
+
+    # ── 曲线 section ──────────────────────────────────────────────────────────
+
+    def _build_curves_content(self, lo: QVBoxLayout) -> None:
+        """Curves section: circle-style channel selector + interactive curve editor."""
+        btn_row = QWidget()
+        btn_row.setStyleSheet("background:transparent;")
+        btn_lo = QHBoxLayout(btn_row)
+        btn_lo.setContentsMargins(0, 0, 0, 4)
+        btn_lo.setSpacing(6)
+
+        # S-curve preset icon (left icon button)
+        s_btn = QPushButton()
+        s_btn.setFixedSize(28, 28)
+        s_btn.setToolTip("S 曲线")
+        s_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        s_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        s_btn.setStyleSheet(
+            f"QPushButton{{background:{C_BG_ITEM}; border-radius:6px; border:1px solid {C_BORDER};}}"
+            f"QPushButton:hover{{background:#3a3a3a; border-color:#555;}}"
+        )
+        s_btn.setIcon(_qicon("trending-up", 14, C_TEXT_3))
+        s_btn.setIconSize(QSize(14, 14))
+        btn_lo.addWidget(s_btn)
+
+        # Circle channel buttons: composite, white, red, green, blue
+        _CH_CIRCLES = [
+            ("RGB", "#cccccc", True),
+            ("亮度", "#ffffff", False),
+            ("R",   "#ff4444", False),
+            ("G",   "#44cc44", False),
+            ("B",   "#4488ff", False),
+        ]
+        self._curve_btns: list[QPushButton] = []
+        self._curve_editors: dict[str, CurveEditor] = {}
+
+        for ch_label, ch_color, active in _CH_CIRCLES:
+            b = QPushButton()
+            b.setFixedSize(22, 22)
+            b.setCheckable(True)
+            b.setChecked(active)
+            b.setToolTip(ch_label)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            border = f"2px solid {C_WHITE}" if active else f"1px solid {C_BORDER}"
+            b.setStyleSheet(
+                f"QPushButton{{background:{ch_color}; border-radius:11px; border:{border};}}"
+                f"QPushButton:checked{{border:2px solid {C_WHITE};}}"
+                f"QPushButton:hover{{border:2px solid #999999;}}"
+            )
+            b._ch_label = ch_label   # type: ignore[attr-defined]
+            b._ch_color = ch_color   # type: ignore[attr-defined]
+            b.clicked.connect(lambda _, bn=b: self._on_curve_channel(bn))
+            btn_lo.addWidget(b)
+            self._curve_btns.append(b)
+
+        btn_lo.addStretch()
+        # auto-adjust icon
+        auto_btn = QPushButton()
+        auto_btn.setFixedSize(24, 24)
+        auto_btn.setToolTip("自动调整")
+        auto_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        auto_btn.setStyleSheet(
+            "QPushButton{background:transparent; border:none;}"
+            "QPushButton:hover{background:#333; border-radius:4px;}"
+        )
+        auto_btn.setIcon(_qicon("crosshair", 13, C_TEXT_4))
+        auto_btn.setIconSize(QSize(13, 13))
+        btn_lo.addWidget(auto_btn)
+        lo.addWidget(btn_row)
+
+        # curve editors (stacked, show/hide by channel)
+        _CH_EDITORS = [
+            ("RGB", "#cccccc", True),
+            ("亮度", "#ffffff", False),
+            ("R",   "#ff4444", False),
+            ("G",   "#44cc44", False),
+            ("B",   "#4488ff", False),
+        ]
+        for ch_label, ch_color, active in _CH_EDITORS:
+            ed = CurveEditor(curve_color=ch_color, height=150)
+            ed.setVisible(active)
+            self._curve_editors[ch_label] = ed
+            lo.addWidget(ed)
+
+        # axis labels
+        label_row = QWidget()
+        label_row.setStyleSheet("background:transparent;")
+        lr_lo = QHBoxLayout(label_row)
+        lr_lo.setContentsMargins(4, 2, 4, 0)
+        lr_lo.setSpacing(0)
+        lr_lo.addWidget(_lbl("阴影", C_TEXT_4, 10))
+        lr_lo.addStretch()
+        lr_lo.addWidget(_lbl("中间调", C_TEXT_4, 10))
+        lr_lo.addStretch()
+        lr_lo.addWidget(_lbl("高光", C_TEXT_4, 10))
+        lo.addWidget(label_row)
+
+    def _on_curve_channel(self, clicked_btn: QPushButton) -> None:
+        for b in self._curve_btns:
+            active = (b is clicked_btn)
+            b.setChecked(active)
+            col = b._ch_color  # type: ignore[attr-defined]
+            border = f"2px solid {C_WHITE}" if active else f"1px solid {C_BORDER}"
+            b.setStyleSheet(
+                f"QPushButton{{background:{col}; border-radius:11px; border:{border};}}"
+                f"QPushButton:checked{{border:2px solid {C_WHITE};}}"
+                f"QPushButton:hover{{border:2px solid #999999;}}"
+            )
+            self._curve_editors[b._ch_label].setVisible(active)   # type: ignore[attr-defined]
+
+    # ── HSL section ───────────────────────────────────────────────────────────
+
+    def _build_hsl_content(self, lo: QVBoxLayout) -> None:
+        """HSL section: 色相/饱和度/明亮度 tab buttons + 8 gradient sliders."""
+        # sub-tab buttons
+        tab_row = QWidget()
+        tab_row.setStyleSheet("background:transparent;")
+        tr_lo = QHBoxLayout(tab_row)
+        tr_lo.setContentsMargins(0, 0, 0, 0)
+        tr_lo.setSpacing(4)
+
+        self._hsl_mode = "色相"
+        self._hsl_btns: dict[str, QPushButton] = {}
+        self._hsl_slider_groups: dict[str, QWidget] = {}
+
+        # pill-container row: [色相] [饱和度] [明亮度] + target icon
+        pill_w = QWidget()
+        pill_w.setFixedHeight(30)
+        pill_w.setStyleSheet(
+            f"background:{C_BG_ITEM}; border-radius:6px;"
+        )
+        pill_lo = QHBoxLayout(pill_w)
+        pill_lo.setContentsMargins(2, 2, 2, 2)
+        pill_lo.setSpacing(0)
+
+        _HSL_TABS = ["色相", "饱和度", "明亮度"]
+        for mode in _HSL_TABS:
+            b = QPushButton(mode)
+            b.setCheckable(True)
+            b.setChecked(mode == "色相")
+            b.setFixedHeight(26)
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            active = (mode == "色相")
+            b.setStyleSheet(
+                f"QPushButton{{background:{'#3a3a3a' if active else 'transparent'};"
+                f"color:{C_TEXT_1 if active else C_TEXT_3};"
+                f"border-radius:4px; border:none; font-size:12px; font-weight:{'500' if active else 'normal'};}}"
+                f"QPushButton:hover{{color:{C_TEXT_1}; background:#333333;}}"
+            )
+            b._hsl_mode = mode  # type: ignore[attr-defined]
+            b.clicked.connect(lambda _, bn=b: self._on_hsl_mode(bn))
+            pill_lo.addWidget(b)
+            self._hsl_btns[mode] = b
+
+        tr_lo.addWidget(pill_w, 1)
+        tr_lo.addSpacing(6)
+
+        # target icon button (right side)
+        tgt_btn = QPushButton()
+        tgt_btn.setFixedSize(26, 26)
+        tgt_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        tgt_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        tgt_btn.setToolTip("目标调整工具")
+        tgt_btn.setStyleSheet(
+            "QPushButton{background:transparent; border:none;}"
+            "QPushButton:hover{background:#333; border-radius:4px;}"
+        )
+        tgt_btn.setIcon(_qicon("crosshair", 14, C_TEXT_4))
+        tgt_btn.setIconSize(QSize(14, 14))
+        tr_lo.addWidget(tgt_btn)
+
+        lo.addWidget(tab_row)
+        lo.addSpacing(4)
+
+        _COLORS = [
+            ("红色",  "#ff44aa", "#ff4444"),
+            ("橙色",  "#ff4400", "#ffaa00"),
+            ("黄色",  "#ffaa00", "#aacc00"),
+            ("绿色",  "#aacc00", "#00bbaa"),
+            ("浅绿色","#00bbaa", "#0088cc"),
+            ("蓝色",  "#0088cc", "#6655ff"),
+            ("紫色",  "#6655ff", "#cc44cc"),
+            ("洋红色","#cc44cc", "#ff44aa"),
+        ]
+
+        for mode in _HSL_TABS:
+            grp = QWidget()
+            grp.setStyleSheet("background:transparent;")
+            grp_lo = QVBoxLayout(grp)
+            grp_lo.setContentsMargins(0, 0, 0, 0)
+            grp_lo.setSpacing(6)
+            for color_name, lc, rc in _COLORS:
+                self._add_gradient_slider_row(grp_lo, color_name, 0, lc, rc, -100, 100, 0)
+            grp.setVisible(mode == "色相")
+            self._hsl_slider_groups[mode] = grp
+            lo.addWidget(grp)
+
+    def _on_hsl_mode(self, clicked_btn: QPushButton) -> None:
+        for mode, b in self._hsl_btns.items():
+            active = (b is clicked_btn)
+            b.setChecked(active)
+            b.setStyleSheet(
+                f"QPushButton{{background:{'#3a3a3a' if active else 'transparent'};"
+                f"color:{C_TEXT_1 if active else C_TEXT_3};"
+                f"border-radius:4px; border:none; font-size:12px; font-weight:{'500' if active else 'normal'};}}"
+                f"QPushButton:hover{{color:{C_TEXT_1}; background:#333333;}}"
+            )
+            self._hsl_slider_groups[mode].setVisible(active)
+
+    # ── 颜色分级 section ──────────────────────────────────────────────────────
+
+    def _build_color_grading_content(self, lo: QVBoxLayout) -> None:
+        """Color grading: sphere preset row + 3 color wheels with lum sliders."""
+        # ── preset sphere row ─────────────────────────────────────────────────
+        presets_row = QWidget()
+        presets_row.setStyleSheet("background:transparent;")
+        pr_lo = QHBoxLayout(presets_row)
+        pr_lo.setContentsMargins(0, 0, 0, 4)
+        pr_lo.setSpacing(8)
+
+        # 4 sphere dots (all / shadows / midtones / highlights)
+        _SPHERE_DEFS = [
+            ("#5533bb", "#9966ff", True),   # all  – purple-ish
+            ("#444444", "#888888", False),  # shadows
+            ("#888888", "#aaaaaa", False),  # midtones
+            ("#aaaaaa", "#dddddd", False),  # highlights
+        ]
+        for dark_c, light_c, active in _SPHERE_DEFS:
+            dot = QLabel()
+            dot.setFixedSize(26, 26)
+            dot.setCursor(Qt.CursorShape.PointingHandCursor)
+            px = QPixmap(26, 26)
+            px.fill(Qt.GlobalColor.transparent)
+            pp = QPainter(px)
+            pp.setRenderHint(QPainter.RenderHint.Antialiasing)
+            grad = QLinearGradient(4, 4, 22, 22)
+            grad.setColorAt(0.0, QColor(light_c))
+            grad.setColorAt(1.0, QColor(dark_c))
+            pp.setBrush(QBrush(grad))
+            border_pen = QPen(QColor(C_PRIMARY if active else C_BORDER), 1.5)
+            pp.setPen(border_pen)
+            pp.drawEllipse(2, 2, 22, 22)
+            pp.end()
+            dot.setPixmap(px)
+            pr_lo.addWidget(dot)
+
+        # half-circle / split icon
+        half_lbl = QLabel()
+        half_lbl.setFixedSize(26, 26)
+        half_px = QPixmap(26, 26)
+        half_px.fill(Qt.GlobalColor.transparent)
+        hp = QPainter(half_px)
+        hp.setRenderHint(QPainter.RenderHint.Antialiasing)
+        hp.setPen(QPen(QColor(C_TEXT_4), 1.5))
+        hp.setBrush(Qt.BrushStyle.NoBrush)
+        hp.drawEllipse(3, 3, 20, 20)
+        hp.setBrush(QBrush(QColor(C_TEXT_4)))
+        path_half = QPainterPath()
+        path_half.moveTo(13, 3)
+        path_half.arcTo(3, 3, 20, 20, 90, 180)
+        path_half.closeSubpath()
+        hp.fillPath(path_half, QBrush(QColor(C_TEXT_4)))
+        hp.end()
+        half_lbl.setPixmap(half_px)
+        pr_lo.addWidget(half_lbl)
+
+        pr_lo.addStretch()
+        lo.addWidget(presets_row)
+        lo.addSpacing(4)
+
+        # ── helper: wheel + lum slider unit ──────────────────────────────────
+        def _wheel_unit(label: str, wheel_r: int = 52) -> QWidget:
+            """A labelled color wheel with a vertical luminance slider on its left."""
+            w = QWidget()
+            w.setStyleSheet("background:transparent;")
+            w_lo = QVBoxLayout(w)
+            w_lo.setContentsMargins(0, 0, 0, 0)
+            w_lo.setSpacing(3)
+            w_lo.addWidget(
+                _lbl(label, C_TEXT_3, 11),
+                alignment=Qt.AlignmentFlag.AlignHCenter,
+            )
+            row = QWidget()
+            row.setStyleSheet("background:transparent;")
+            r_lo = QHBoxLayout(row)
+            r_lo.setContentsMargins(0, 0, 0, 0)
+            r_lo.setSpacing(4)
+
+            # left luminance slider (vertical)
+            lum = QSlider(Qt.Orientation.Vertical)
+            lum.setRange(-100, 100)
+            lum.setValue(0)
+            lum.setFixedWidth(14)
+            lum.setStyleSheet(
+                f"QSlider::groove:vertical{{background:{C_BG_ITEM}; width:4px; border-radius:2px;}}"
+                f"QSlider::handle:vertical{{background:{C_TEXT_4}; width:10px; height:10px;"
+                f"border-radius:5px; margin:-3px 0; left:-3px;}}"
+            )
+
+            whl = ColorWheelWidget()
+            whl._R = wheel_r  # type: ignore[attr-defined]
+            sz = wheel_r * 2 + 4
+            whl.setFixedSize(sz, sz)
+
+            r_lo.addWidget(lum, alignment=Qt.AlignmentFlag.AlignVCenter)
+            r_lo.addWidget(whl, alignment=Qt.AlignmentFlag.AlignVCenter)
+            r_lo.addStretch()
+            w_lo.addWidget(row)
+            return w
+
+        # midtone (large, centred)
+        mid_outer = QWidget()
+        mid_outer.setStyleSheet("background:transparent;")
+        mid_h = QHBoxLayout(mid_outer)
+        mid_h.setContentsMargins(0, 0, 0, 0)
+        mid_h.addStretch()
+        mid_h.addWidget(_wheel_unit("中间调", wheel_r=50))
+        mid_h.addStretch()
+        lo.addWidget(mid_outer)
+        lo.addSpacing(8)
+
+        # shadows + highlights (smaller, side by side)
+        small_row = QWidget()
+        small_row.setStyleSheet("background:transparent;")
+        sm_lo = QHBoxLayout(small_row)
+        sm_lo.setContentsMargins(0, 0, 0, 0)
+        sm_lo.setSpacing(8)
+        sm_lo.addWidget(_wheel_unit("阴影", wheel_r=36))
+        sm_lo.addWidget(_wheel_unit("高光", wheel_r=36))
+        lo.addWidget(small_row)
+
+    # ── 可选颜色 section ──────────────────────────────────────────────────────
+
+    def _build_selective_color_content(self, lo: QVBoxLayout) -> None:
+        """Selective color: color picker + CMYK sliders."""
+        # color selector dropdown
+        sel_row = QWidget()
+        sel_row.setStyleSheet("background:transparent;")
+        sr_lo = QHBoxLayout(sel_row)
+        sr_lo.setContentsMargins(0, 0, 0, 0)
+        sr_lo.setSpacing(6)
+        sr_lo.addWidget(_lbl("颜色", C_TEXT_3, 12))
+
+        dd = QWidget()
+        dd.setFixedHeight(26)
+        dd.setStyleSheet(
+            f"background:{C_BG_ITEM}; border-radius:5px; border:1px solid {C_BORDER};"
+        )
+        dd_lo = QHBoxLayout(dd)
+        dd_lo.setContentsMargins(8, 0, 6, 0)
+        dd_lo.setSpacing(0)
+        dd_lo.addWidget(_lbl("红色", C_TEXT_1, 12))
+        dd_lo.addStretch()
+        chev = QLabel()
+        chev.setPixmap(icon_pixmap("chevron-down", 10, C_TEXT_4))
+        chev.setFixedSize(10, 10)
+        dd_lo.addWidget(chev)
+        sr_lo.addWidget(dd, 1)
+        lo.addWidget(sel_row)
+        lo.addSpacing(4)
+
+        for label, lc, rc in [
+            ("青色",   "#00bbcc", "#ff4444"),
+            ("洋红色", "#cc00aa", "#00cc44"),
+            ("黄色",   "#0044cc", "#ffee00"),
+            ("黑色",   "#ffffff", "#000000"),
+        ]:
+            self._add_gradient_slider_row(lo, label, 0, lc, rc, -100, 100, 0)
+
+    # ── 细节 section ──────────────────────────────────────────────────────────
+
+    def _build_detail_content(self, lo: QVBoxLayout) -> None:
+        """Detail section: sharpening + noise reduction."""
+        lo.addWidget(_lbl("锐化", C_TEXT_3, 11))
+        for label, lc, rc in [
+            ("数量",   "#1a1a1a", "#ffffff"),
+            ("半径",   "#1a1a1a", "#ffffff"),
+            ("细节",   "#1a1a1a", "#ffffff"),
+            ("蒙版",   "#1a1a1a", "#ffffff"),
+        ]:
+            self._add_gradient_slider_row(lo, label, 0, lc, rc, 0, 100, 0)
+        lo.addSpacing(4)
+        lo.addWidget(_lbl("降噪", C_TEXT_3, 11))
+        for label, lc, rc in [
+            ("明亮度",   "#1a1a1a", "#ffffff"),
+            ("明亮度细节", "#1a1a1a", "#ffffff"),
+            ("颜色",     "#1a1a1a", "#ffffff"),
+        ]:
+            self._add_gradient_slider_row(lo, label, 0, lc, rc, 0, 100, 0)
+
+    # ── 镜头 section ──────────────────────────────────────────────────────────
+
+    def _build_lens_content(self, lo: QVBoxLayout) -> None:
+        """Lens correction: distortion, vignette, chromatic aberration."""
+        for label, lc, rc in [
+            ("扭曲校正", "#1a1a1a", "#ffffff"),
+            ("暗角",     "#000000", "#ffffff"),
+            ("暗角中点", "#1a1a1a", "#ffffff"),
+            ("色差",     "#1a1a1a", "#ffffff"),
+        ]:
+            self._add_gradient_slider_row(lo, label, 0, lc, rc, -100, 100, 0)
+
+    # ── 透视矫正 section ──────────────────────────────────────────────────────
+
+    def _build_perspective_content(self, lo: QVBoxLayout) -> None:
+        """Perspective transform sliders."""
+        for label, lc, rc in [
+            ("水平",   "#1a1a1a", "#ffffff"),
+            ("垂直",   "#1a1a1a", "#ffffff"),
+            ("旋转",   "#1a1a1a", "#ffffff"),
+            ("缩放",   "#1a1a1a", "#ffffff"),
+        ]:
+            self._add_gradient_slider_row(lo, label, 0, lc, rc, -100, 100, 0)
+
+    # ── 颜色校准 section ──────────────────────────────────────────────────────
+
+    def _build_color_calibration_content(self, lo: QVBoxLayout) -> None:
+        """Color calibration: per-channel hue/saturation."""
+        for ch, hue_lc, hue_rc in [
+            ("红色原色", "#ff44aa", "#ff4444"),
+            ("绿色原色", "#aacc00", "#00bbaa"),
+            ("蓝色原色", "#0088cc", "#6655ff"),
+        ]:
+            lo.addWidget(_lbl(ch, C_TEXT_3, 11))
+            self._add_gradient_slider_row(lo, "色相",  0, hue_lc,   hue_rc,   -100, 100, 0)
+            self._add_gradient_slider_row(lo, "饱和度", 0, "#1a1a1a", "#ffffff", -100, 100, 0)
+            lo.addSpacing(2)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN EDITOR WINDOW
@@ -1819,7 +2311,7 @@ class MainEditorWindow(QWidget):
     Layout:
         ┌─────────────────────── EditorTopBar (h=48) ──────────────────────────┐
         │ ToolSidebar │ ToolOptionsBar + CanvasArea + StatusBar │ RightPanel   │
-        │  (w=48)     │         (fills remaining width)          │  (w=280)    │
+        │  (w=48)     │         (fills remaining width)          │  (w=320)    │
         └─────────────────────────────────────────────────────────────────────┘
     """
 

@@ -161,7 +161,7 @@ class UnifiedTopBar(QWidget):
     # ── construction ──────────────────────────────────────────────────────────
     def _build(self) -> None:
         lo = QHBoxLayout(self)
-        lo.setContentsMargins(16, 0, 16, 0)
+        lo.setContentsMargins(16, 0, 0, 0)
         lo.setSpacing(0)
 
         # ── left permanent section ────────────────────────────────────────────
@@ -232,15 +232,20 @@ class UnifiedTopBar(QWidget):
         editor_right_w  = self._build_editor_right()
         self._right_stack.addWidget(gallery_right_w)   # 0
         self._right_stack.addWidget(editor_right_w)    # 1
-        lo.addWidget(self._right_stack)
-
-        lo.addSpacing(8)
-
-        # shared avatar
+        # 320px fixed-width wrapper — aligns exactly with the 320px RightPanel below
+        right_wrapper = QWidget()
+        right_wrapper.setFixedWidth(320)
+        rw_lo = QHBoxLayout(right_wrapper)
+        rw_lo.setContentsMargins(0, 0, 16, 0)   # 16px right padding (replaces removed outer margin)
+        rw_lo.setSpacing(0)
+        rw_lo.addStretch()
+        rw_lo.addWidget(self._right_stack)
+        rw_lo.addSpacing(8)
         avatar = QLabel()
         avatar.setFixedSize(28, 28)
         avatar.setPixmap(_avatar_pixmap(28))
-        lo.addWidget(avatar)
+        rw_lo.addWidget(avatar)
+        lo.addWidget(right_wrapper)
 
         # apply initial mode styling
         self._refresh_mode_buttons()
