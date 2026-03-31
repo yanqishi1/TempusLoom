@@ -87,7 +87,11 @@ def _qicon(icon_name: str, size: int, color: str):
 
 
 def _logo_pixmap(size: int = 24) -> QPixmap:
-    px = QPixmap(size, size)
+    app = QApplication.instance()
+    ratio = app.primaryScreen().devicePixelRatio() if app and app.primaryScreen() else 1.0
+    px_size = int(size * ratio)
+    px = QPixmap(px_size, px_size)
+    px.setDevicePixelRatio(ratio)
     px.fill(Qt.GlobalColor.transparent)
     p = QPainter(px)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -234,46 +238,36 @@ class EditorTopBar(QWidget):
         lo.addSpacing(8)
 
         # save
-        save_btn = QPushButton()
+        save_btn = QPushButton("保存")
         save_btn.setFixedHeight(32)
         save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         save_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        save_btn.setIcon(_qicon("save", 14, C_TEXT_2))
+        save_btn.setIconSize(QSize(14, 14))
         save_btn.setStyleSheet(
-            f"background:{C_BG_ITEM}; color:{C_TEXT_2}; border-radius:6px;"
-            f"border:none; padding:0 14px; font-size:13px;"
+            f"QPushButton{{background:{C_BG_ITEM}; border-radius:6px; border:none;"
+            f"color:{C_TEXT_2}; font-size:13px; padding:0 14px;}}"
             f"QPushButton:hover{{background:#383838;}}"
+            f"QPushButton:pressed{{background:#3a3a3a;}}"
         )
         save_btn.clicked.connect(self.save_requested.emit)
-        save_lo = QHBoxLayout(save_btn)
-        save_lo.setContentsMargins(14, 0, 14, 0)
-        save_lo.setSpacing(6)
-        s_icon = QLabel()
-        s_icon.setPixmap(icon_pixmap("save", 14, C_TEXT_3))
-        s_icon.setFixedSize(14, 14)
-        save_lo.addWidget(s_icon)
-        save_lo.addWidget(_lbl("保存", C_TEXT_2, 13))
         lo.addWidget(save_btn)
         lo.addSpacing(8)
 
         # export
-        export_btn = QPushButton()
+        export_btn = QPushButton("导出")
         export_btn.setFixedHeight(32)
         export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         export_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        export_btn.setIcon(_qicon("share", 14, C_TEXT_2))
+        export_btn.setIconSize(QSize(14, 14))
         export_btn.setStyleSheet(
-            f"background:{C_PRIMARY}; border-radius:6px; border:none; padding:0 14px;"
-            f"QPushButton:hover{{background:{C_PRIMARY_H};}}"
-            f"QPushButton:pressed{{background:#2855cc;}}"
+            f"QPushButton{{background:{C_BG_ITEM}; border-radius:6px; border:none;"
+            f"color:{C_TEXT_2}; font-size:13px; padding:0 14px;}}"
+            f"QPushButton:hover{{background:#383838;}}"
+            f"QPushButton:pressed{{background:#3a3a3a;}}"
         )
         export_btn.clicked.connect(self.export_requested.emit)
-        exp_lo = QHBoxLayout(export_btn)
-        exp_lo.setContentsMargins(14, 0, 14, 0)
-        exp_lo.setSpacing(6)
-        e_icon = QLabel()
-        e_icon.setPixmap(icon_pixmap("share", 14, C_BG_PANEL))
-        e_icon.setFixedSize(14, 14)
-        exp_lo.addWidget(e_icon)
-        exp_lo.addWidget(_lbl("导出", C_WHITE, 13, QFont.Weight.Medium))
         lo.addWidget(export_btn)
         lo.addSpacing(8)
 
@@ -787,6 +781,40 @@ class EditorStatusBar(QWidget):
 # LAYER ROW
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _layer_thumb_pixmap(color: str, layer_type: str, size: int = 34) -> QPixmap:
+    """HiDPI-aware square thumbnail for a layer row.
+    Draws type-specific icons: 'T' for text layers, outline rect for mask layers.
+    """
+    app = QApplication.instance()
+    ratio = app.primaryScreen().devicePixelRatio() if app and app.primaryScreen() else 1.0
+    px_size = int(size * ratio)
+    px = QPixmap(px_size, px_size)
+    px.setDevicePixelRatio(ratio)
+    px.fill(Qt.GlobalColor.transparent)
+    p = QPainter(px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    # rounded background fill
+    clip = QPainterPath()
+    clip.addRoundedRect(QRectF(0, 0, size, size), 4, 4)
+    p.setClipPath(clip)
+    p.fillRect(QRectF(0, 0, size, size), QColor(color))
+    # type-specific overlay
+    if layer_type == "文字":
+        p.setPen(QColor(C_TEXT_1))
+        p.setFont(QFont("Arial", max(int(size * 0.52), 8), QFont.Weight.Bold))
+        p.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, "T")
+    elif layer_type == "蒙版":
+        pen = QPen(QColor(C_TEXT_2))
+        pen.setWidthF(max(1.0, size / 22.0))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        m = size * 0.22
+        p.drawRoundedRect(QRectF(m, m, size - 2 * m, size - 2 * m), 2, 2)
+    p.end()
+    return px
+
+
 class LayerRow(QWidget):
     """Single layer entry in the layers list."""
 
@@ -797,11 +825,11 @@ class LayerRow(QWidget):
                  thumb_color: str, active: bool = False,
                  locked: bool = False, parent=None) -> None:
         super().__init__(parent)
-        self._index   = index
-        self._active  = active
-        self._visible = True
-        self._locked  = locked
-        self.setFixedHeight(44)
+        self._index      = index
+        self._active     = active
+        self._visible    = True
+        self._locked     = locked
+        self.setFixedHeight(46)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._build(name, layer_type, thumb_color, locked)
         self._update_style()
@@ -809,12 +837,12 @@ class LayerRow(QWidget):
     def _build(self, name: str, layer_type: str,
                thumb_color: str, locked: bool) -> None:
         lo = QHBoxLayout(self)
-        lo.setContentsMargins(8, 0, 8, 0)
-        lo.setSpacing(8)
+        lo.setContentsMargins(10, 0, 10, 0)
+        lo.setSpacing(10)
 
-        # eye icon
+        # eye icon (16 × 16)
         self._eye_btn = QPushButton()
-        self._eye_btn.setFixedSize(14, 14)
+        self._eye_btn.setFixedSize(16, 16)
         self._eye_btn.setStyleSheet("background:transparent; border:none;")
         self._eye_btn.setCheckable(True)
         self._eye_btn.setChecked(True)
@@ -824,23 +852,24 @@ class LayerRow(QWidget):
         self._refresh_eye()
         lo.addWidget(self._eye_btn)
 
-        # thumbnail
-        thumb = QFrame()
-        thumb.setFixedSize(32, 24)
-        thumb.setStyleSheet(
-            f"background:{thumb_color}; border-radius:4px;"
-            + (f"border:1px solid {C_PRIMARY};" if self._active else "")
+        # thumbnail (34 × 34 square)
+        self._thumb_lbl = QLabel()
+        self._thumb_lbl.setPixmap(_layer_thumb_pixmap(thumb_color, layer_type, 34))
+        self._thumb_lbl.setFixedSize(34, 34)
+        self._thumb_lbl.setStyleSheet(
+            f"border-radius:4px; border:{'1px solid ' + C_PRIMARY if self._active else 'none'};"
         )
-        lo.addWidget(thumb)
+        lo.addWidget(self._thumb_lbl)
 
         # name + type
         info_w = QWidget()
+        info_w.setStyleSheet("background:transparent;")
         info_lo = QVBoxLayout(info_w)
         info_lo.setContentsMargins(0, 0, 0, 0)
-        info_lo.setSpacing(1)
-        n_color = C_PRIMARY if self._active else C_TEXT_1
-        self._name_lbl = _lbl(name, n_color, 12, QFont.Weight.Medium)
-        self._type_lbl = _lbl(layer_type, C_TEXT_3, 10)
+        info_lo.setSpacing(2)
+        n_color = C_WHITE if self._active else C_TEXT_1
+        self._name_lbl = _lbl(name, n_color, 13, QFont.Weight.Medium)
+        self._type_lbl = _lbl(layer_type, C_TEXT_3, 11)
         info_lo.addWidget(self._name_lbl)
         info_lo.addWidget(self._type_lbl)
         lo.addWidget(info_w, 1)
@@ -848,8 +877,9 @@ class LayerRow(QWidget):
         # lock
         if locked:
             lock_lbl = QLabel()
-            lock_lbl.setPixmap(icon_pixmap("lock", 12, "#555555"))
-            lock_lbl.setFixedSize(12, 12)
+            lock_lbl.setPixmap(icon_pixmap("lock", 13, "#555555"))
+            lock_lbl.setFixedSize(13, 13)
+            lock_lbl.setStyleSheet("background:transparent;")
             lo.addWidget(lock_lbl)
 
     def _on_eye_toggled(self, visible: bool) -> None:
@@ -858,16 +888,19 @@ class LayerRow(QWidget):
         self.visibility_toggled.emit(self._index, visible)
 
     def _refresh_eye(self) -> None:
-        color = (C_PRIMARY if self._active else C_TEXT_4) if self._visible else "#444444"
-        self._eye_btn.setIcon(_qicon("eye", 14, color))
-        self._eye_btn.setIconSize(QSize(14, 14))
+        color = (C_TEXT_2 if self._active else C_TEXT_4) if self._visible else "#444444"
+        self._eye_btn.setIcon(_qicon("eye", 16, color))
+        self._eye_btn.setIconSize(QSize(16, 16))
 
     def set_active(self, active: bool) -> None:
         self._active = active
         self._update_style()
-        n_color = C_PRIMARY if active else C_TEXT_1
+        n_color = C_WHITE if active else C_TEXT_1
         self._name_lbl.setStyleSheet(
-            f"color:{n_color}; font-size:12px; font-weight:500; background:transparent;"
+            f"color:{n_color}; font-size:13px; font-weight:500; background:transparent;"
+        )
+        self._thumb_lbl.setStyleSheet(
+            f"border-radius:4px; border:{'1px solid ' + C_PRIMARY if active else 'none'};"
         )
         self._refresh_eye()
 
@@ -1590,6 +1623,7 @@ class RightPanel(QWidget):
             row.visibility_toggled.connect(self._on_layer_visibility)
             self._layer_rows.append(row)
             layer_list_lo.addWidget(row)
+        layer_list_lo.addStretch()   # collapse unused space to bottom
 
         lo.addWidget(layer_list_w, 1)
 

@@ -13,11 +13,20 @@ from PyQt6.QtGui import (
     QColor, QPainter, QPainterPath, QPen, QBrush,
     QPixmap, QFont, QPolygonF,
 )
+from PyQt6.QtWidgets import QApplication
 
 
 def icon_pixmap(name: str, size: int, color: str) -> QPixmap:
-    """Return a *size*×*size* QPixmap with icon *name* drawn in *color*."""
-    px = QPixmap(size, size)
+    """Return a *size*×*size* QPixmap with icon *name* drawn in *color*.
+
+    HiDPI-aware: backing store is created at physical pixel size and
+    devicePixelRatio is set so Qt displays it at the correct logical size.
+    """
+    app = QApplication.instance()
+    ratio = app.primaryScreen().devicePixelRatio() if app and app.primaryScreen() else 1.0
+    px_size = int(size * ratio)
+    px = QPixmap(px_size, px_size)
+    px.setDevicePixelRatio(ratio)
     px.fill(Qt.GlobalColor.transparent)
     p = QPainter(px)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
