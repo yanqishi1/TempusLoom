@@ -1431,7 +1431,7 @@ class RightPanel(QWidget):
         self.setStyleSheet(
             f"background:{C_BG_RIGHT};"
         )
-        self._active_tab = "调整"
+        self._active_tab = "蒙板"
         self._active_layer = 0
         self._layer_rows: list[LayerRow] = []
         self._build()
@@ -1452,17 +1452,18 @@ class RightPanel(QWidget):
         self._layers_widget = self._build_layers_content()
         self._adjust_widget = self._build_adjust_content()
         self._ai_widget     = self._build_placeholder("AI 助手", "智能增强、降噪、抠图…")
-        self._history_widget= self._build_placeholder("历史记录", "每一步操作均被记录")
+        self._history_widget= self._build_history_content()
         self._portrait_widget=self._build_placeholder("人像",    "皮肤磨皮、五官修整…")
-        self._mask_widget   = self._build_placeholder("蒙板",    "通道蒙板、矢量蒙板…")
+        self._preset_widget = self._build_placeholder("预设",    "常用修图模板与风格预设…")
+        self._mask_widget   = self._build_mask_content()
 
         for w in (self._layers_widget, self._adjust_widget,
                   self._ai_widget, self._history_widget,
-                  self._portrait_widget, self._mask_widget):
+                  self._portrait_widget, self._preset_widget,
+                  self._mask_widget):
             self._stack.addWidget(w)
 
-        # show 调整 (index 1) by default
-        self._stack.setCurrentIndex(1)
+        self._stack.setCurrentIndex(6)
         lo.addWidget(self._stack, 1)
 
     # ── tab bar ───────────────────────────────────────────────────────────────
@@ -1470,11 +1471,12 @@ class RightPanel(QWidget):
     # icon name mapped to each tab label
     _TAB_DEFS: list[tuple[str, str]] = [
         ("调整", "sliders-horizontal"),
+        ("蒙板", "circle-dashed"),
         ("图层", "layers"),
         ("AI",   "wand-2"),
         ("历史", "clock"),
         ("人像", "user"),
-        ("蒙板", "circle-dashed"),
+        ("预设", "bookmark"),
     ]
 
     def _build_tab_bar(self) -> QWidget:
@@ -1513,10 +1515,9 @@ class RightPanel(QWidget):
     def _on_tab(self, tab: str) -> None:
         self._active_tab = tab
         self._refresh_tabs()
-        tab_order = ["调整", "图层", "AI", "历史", "人像", "蒙板"]
+        tab_order = ["调整", "蒙板", "图层", "AI", "历史", "人像", "预设"]
         idx = tab_order.index(tab) if tab in tab_order else 0
-        # stack order: adjust(0), layers(1), ai(2), history(3), portrait(4), mask(5)
-        stack_map = {"调整": 1, "图层": 0, "AI": 2, "历史": 3, "人像": 4, "蒙板": 5}
+        stack_map = {"图层": 0, "调整": 1, "AI": 2, "历史": 3, "人像": 4, "预设": 5, "蒙板": 6}
         self._stack.setCurrentIndex(stack_map.get(tab, 0))
 
     def _refresh_tabs(self) -> None:
@@ -1688,6 +1689,310 @@ class RightPanel(QWidget):
         lo.addWidget(_lbl(desc, C_TEXT_3, 12),
                      alignment=Qt.AlignmentFlag.AlignCenter)
         return w
+
+    def _mask_title(self, text: str) -> QLabel:
+        return _lbl(text, C_TEXT_1, 13, QFont.Weight.Medium)
+
+    def _mask_subtitle(self, text: str) -> QLabel:
+        lbl = _lbl(text, C_TEXT_3, 11)
+        lbl.setWordWrap(True)
+        return lbl
+
+    def _build_mask_tool_button(self, text: str, *, active: bool = False) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setCheckable(True)
+        btn.setChecked(active)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setFixedSize(58, 52)
+        btn.setStyleSheet(
+            f"QPushButton{{background:{C_BG_RIGHT}; color:{C_TEXT_3};"
+            f"border:1px solid {C_BORDER}; border-radius:8px; font-size:10px;"
+            f"padding-top:18px; padding-bottom:8px; text-align:center;}}"
+            f"QPushButton:hover{{border-color:#4a4a4a; color:{C_TEXT_2};}}"
+            f"QPushButton:checked{{background:{C_BG_ACTIVE}; color:{C_PRIMARY_H};"
+            f"border:1px solid {C_PRIMARY};}}"
+        )
+        return btn
+
+    def _build_mask_chip(self, text: str, *, active: bool = False) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setCheckable(True)
+        btn.setChecked(active)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn.setMinimumHeight(28)
+        btn.setStyleSheet(
+            f"QPushButton{{background:{C_BG_ITEM}; color:{C_TEXT_2}; border:none;"
+            f"border-radius:14px; padding:0 12px; font-size:11px;}}"
+            f"QPushButton:hover{{background:#363636; color:{C_TEXT_1};}}"
+            f"QPushButton:checked{{background:{C_BG_ACTIVE}; color:{C_PRIMARY_H};"
+            f"border:1px solid {C_PRIMARY}; padding:0 11px;}}"
+        )
+        return btn
+
+    def _add_mask_slider_row(self, parent_lo: QVBoxLayout, label: str, value: int) -> None:
+        row = QWidget()
+        row_lo = QHBoxLayout(row)
+        row_lo.setContentsMargins(0, 0, 0, 0)
+        row_lo.setSpacing(8)
+
+        row_lo.addWidget(_lbl(label, C_TEXT_2, 11))
+
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(0, 100)
+        slider.setValue(value)
+        slider.setFixedHeight(18)
+        slider.setStyleSheet(
+            f"QSlider::groove:horizontal{{background:{C_BG_ITEM}; height:4px; border-radius:2px;}}"
+            f"QSlider::sub-page:horizontal{{background:{C_PRIMARY}; height:4px; border-radius:2px;}}"
+            f"QSlider::add-page:horizontal{{background:{C_BG_ITEM}; height:4px; border-radius:2px;}}"
+            f"QSlider::handle:horizontal{{background:{C_BG_PANEL}; border:2px solid {C_PRIMARY};"
+            f"width:10px; height:10px; border-radius:5px; margin:-4px 0;}}"
+        )
+        row_lo.addWidget(slider, 1)
+
+        value_lbl = _lbl(str(value), C_TEXT_2, 11)
+        value_lbl.setFixedWidth(24)
+        value_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        slider.valueChanged.connect(lambda v, lb=value_lbl: lb.setText(str(v)))
+        row_lo.addWidget(value_lbl)
+        parent_lo.addWidget(row)
+
+    def _build_mask_content(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(
+            f"QScrollArea{{background:transparent; border:none;}}"
+            f"QScrollBar:vertical{{background:transparent; width:8px; margin:8px 0;}}"
+            f"QScrollBar::handle:vertical{{background:#3a3a3a; border-radius:4px; min-height:24px;}}"
+            f"QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{{height:0;}}"
+            f"QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{{background:transparent;}}"
+        )
+
+        body = QWidget()
+        body.setStyleSheet("background:transparent;")
+        lo = QVBoxLayout(body)
+        lo.setContentsMargins(14, 14, 14, 16)
+        lo.setSpacing(12)
+
+        lo.addWidget(self._mask_title("蒙板工具"))
+        tools = QWidget()
+        tools_lo = QHBoxLayout(tools)
+        tools_lo.setContentsMargins(0, 0, 0, 0)
+        tools_lo.setSpacing(8)
+        for text, active in (("画笔", True), ("线性渐变", False), ("径向渐变", False), ("智能识别", False)):
+            tools_lo.addWidget(self._build_mask_tool_button(text, active=active))
+        lo.addWidget(tools)
+
+        lo.addWidget(_hline())
+        lo.addWidget(self._mask_title("智能识别"))
+        lo.addWidget(self._mask_subtitle("点击选择要识别的区域"))
+
+        lo.addWidget(_lbl("场景", C_TEXT_2, 12, QFont.Weight.Medium))
+        scene_row = QWidget()
+        scene_lo = QHBoxLayout(scene_row)
+        scene_lo.setContentsMargins(0, 0, 0, 0)
+        scene_lo.setSpacing(8)
+        for text, active in (("背景", False), ("天空", False), ("建筑", False)):
+            scene_lo.addWidget(self._build_mask_chip(text, active=active))
+        scene_lo.addStretch()
+        lo.addWidget(scene_row)
+
+        lo.addWidget(_lbl("生物", C_TEXT_2, 12, QFont.Weight.Medium))
+        bio_row = QWidget()
+        bio_lo = QHBoxLayout(bio_row)
+        bio_lo.setContentsMargins(0, 0, 0, 0)
+        bio_lo.setSpacing(8)
+        for text, active in (("人物", True), ("鸟", False), ("动物", False)):
+            bio_lo.addWidget(self._build_mask_chip(text, active=active))
+        bio_lo.addStretch()
+        lo.addWidget(bio_row)
+
+        person_box = QFrame()
+        person_box.setStyleSheet(f"background:{C_BG_ITEM}; border-radius:8px;")
+        person_lo = QVBoxLayout(person_box)
+        person_lo.setContentsMargins(10, 10, 10, 10)
+        person_lo.setSpacing(8)
+        person_lo.addWidget(_lbl("人物细分", C_TEXT_3, 11))
+
+        fine_row1 = QWidget()
+        fine_row1_lo = QHBoxLayout(fine_row1)
+        fine_row1_lo.setContentsMargins(0, 0, 0, 0)
+        fine_row1_lo.setSpacing(8)
+        for text, active in (("全身", True), ("皮肤", False), ("衣服", False)):
+            fine_row1_lo.addWidget(self._build_mask_chip(text, active=active))
+        fine_row1_lo.addStretch()
+        person_lo.addWidget(fine_row1)
+
+        fine_row2 = QWidget()
+        fine_row2_lo = QHBoxLayout(fine_row2)
+        fine_row2_lo.setContentsMargins(0, 0, 0, 0)
+        fine_row2_lo.setSpacing(8)
+        for text in ("面部皮肤", "身体皮肤", "头发", "眼睛", "嘴唇"):
+            fine_row2_lo.addWidget(self._build_mask_chip(text))
+        person_lo.addWidget(fine_row2)
+        lo.addWidget(person_box)
+
+        lo.addWidget(_hline())
+        lo.addWidget(self._mask_title("画笔设置"))
+        self._add_mask_slider_row(lo, "大小", 50)
+        self._add_mask_slider_row(lo, "羽化", 20)
+        self._add_mask_slider_row(lo, "流量", 75)
+        self._add_mask_slider_row(lo, "不透明", 100)
+
+        header_row = QWidget()
+        header_lo = QHBoxLayout(header_row)
+        header_lo.setContentsMargins(0, 0, 0, 0)
+        header_lo.setSpacing(8)
+        header_lo.addWidget(self._mask_title("已创建蒙板"))
+        header_lo.addStretch()
+        header_lo.addWidget(_lbl("3", C_TEXT_3, 12))
+        lo.addWidget(header_row)
+
+        for text, active in (("画笔蒙板 1", True), ("人物-全身", False), ("径向渐变 1", False)):
+            item = QPushButton(text)
+            item.setCursor(Qt.CursorShape.PointingHandCursor)
+            item.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            item.setFixedHeight(36)
+            item.setStyleSheet(
+                f"QPushButton{{text-align:left; padding:0 14px; border-radius:8px;"
+                f"background:{C_BG_ACTIVE if active else C_BG_RIGHT};"
+                f"color:{C_PRIMARY_H if active else C_TEXT_2}; border:1px solid "
+                f"{C_PRIMARY if active else C_BORDER}; font-size:12px;}}"
+                f"QPushButton:hover{{border-color:{C_PRIMARY if active else '#4a4a4a'};}}"
+            )
+            lo.addWidget(item)
+
+        action_row = QWidget()
+        action_lo = QHBoxLayout(action_row)
+        action_lo.setContentsMargins(0, 4, 0, 0)
+        action_lo.setSpacing(8)
+
+        add_btn = QPushButton("+ 新建蒙板")
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        add_btn.setFixedHeight(34)
+        add_btn.setStyleSheet(
+            f"QPushButton{{background:{C_PRIMARY}; color:#ffffff; border:none; border-radius:6px;"
+            f"padding:0 16px; font-size:12px; font-weight:500;}}"
+            f"QPushButton:hover{{background:{C_PRIMARY_H};}}"
+        )
+        action_lo.addWidget(add_btn, 1)
+
+        invert_btn = QPushButton("反选")
+        invert_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        invert_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        invert_btn.setFixedHeight(34)
+        invert_btn.setStyleSheet(
+            f"QPushButton{{background:transparent; color:{C_TEXT_2}; border:1px solid {C_BORDER};"
+            f"border-radius:6px; padding:0 14px; font-size:12px;}}"
+            f"QPushButton:hover{{border-color:#4a4a4a; color:{C_TEXT_1};}}"
+        )
+        action_lo.addWidget(invert_btn)
+
+        delete_btn = QPushButton("删除")
+        delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        delete_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        delete_btn.setFixedHeight(34)
+        delete_btn.setStyleSheet(
+            f"QPushButton{{background:transparent; color:#d66; border:1px solid {C_BORDER};"
+            f"border-radius:6px; padding:0 14px; font-size:12px;}}"
+            f"QPushButton:hover{{border-color:#6a3a3a; background:#2a1f1f;}}"
+        )
+        action_lo.addWidget(delete_btn)
+        lo.addWidget(action_row)
+
+        note_box = QFrame()
+        note_box.setStyleSheet(f"background:{C_BG_ITEM}; border-radius:8px;")
+        note_lo = QVBoxLayout(note_box)
+        note_lo.setContentsMargins(10, 10, 10, 10)
+        note_lo.setSpacing(4)
+        note_lo.addWidget(_lbl("蒙板使用说明", C_TEXT_2, 11, QFont.Weight.Medium))
+        for line in (
+            "• 画板相当于在图层中创建一个编辑范围",
+            "• 选中区域可使用【调整】中的所有功能",
+            "• 支持多个蒙板叠加编辑",
+        ):
+            note_lo.addWidget(_lbl(line, C_TEXT_4, 10))
+        lo.addWidget(note_box)
+
+        lo.addStretch()
+        scroll.setWidget(body)
+        return scroll
+
+    def _build_history_content(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(
+            f"QScrollArea{{background:transparent; border:none;}}"
+            f"QScrollBar:vertical{{background:transparent; width:8px; margin:8px 0;}}"
+            f"QScrollBar::handle:vertical{{background:#3a3a3a; border-radius:4px; min-height:24px;}}"
+            f"QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{{height:0;}}"
+            f"QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{{background:transparent;}}"
+        )
+
+        body = QWidget()
+        body.setStyleSheet("background:transparent;")
+        lo = QVBoxLayout(body)
+        lo.setContentsMargins(16, 18, 16, 16)
+        lo.setSpacing(10)
+
+        history_items = [
+            ("image", "原始状态", None, False),
+            ("sun-medium", "调整曝光 +0.5", None, False),
+            ("circle-half-stroke", "调整对比度 +10", None, False),
+            ("thermometer", "调整色温 -5", None, False),
+            ("droplet", "调整饱和度 +8", None, False),
+            ("circle-dashed", "添加蒙版", None, False),
+            ("sparkles", "AI 自动增强", "Just now", True),
+        ]
+        for icon_name, text, meta, active in history_items:
+            lo.addWidget(self._build_history_row(icon_name, text, meta, active))
+
+        lo.addStretch()
+        scroll.setWidget(body)
+        return scroll
+
+    def _build_history_row(
+        self,
+        icon_name: str,
+        text: str,
+        meta: Optional[str] = None,
+        active: bool = False,
+    ) -> QWidget:
+        row = QWidget()
+        row.setFixedHeight(42 if active else 34)
+        row.setStyleSheet(
+            f"background:{C_BG_ACTIVE if active else 'transparent'};"
+            f"border-radius:{8 if active else 6}px;"
+        )
+
+        lo = QHBoxLayout(row)
+        lo.setContentsMargins(12 if active else 8, 0, 12 if active else 8, 0)
+        lo.setSpacing(10)
+
+        icon_lbl = QLabel()
+        icon_color = C_PRIMARY if active else C_TEXT_4
+        icon_size = 16 if active else 15
+        icon_lbl.setPixmap(icon_pixmap(icon_name, icon_size, icon_color))
+        icon_lbl.setFixedSize(18, 18)
+        lo.addWidget(icon_lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        text_color = C_PRIMARY if active else C_TEXT_2
+        weight = QFont.Weight.Medium if active else QFont.Weight.Normal
+        lo.addWidget(_lbl(text, text_color, 12, weight), 0, Qt.AlignmentFlag.AlignVCenter)
+
+        if meta:
+            lo.addSpacing(2)
+            lo.addWidget(_lbl(meta, C_TEXT_2, 11), 0, Qt.AlignmentFlag.AlignVCenter)
+
+        lo.addStretch()
+        return row
 
     # ── 调整 tab ──────────────────────────────────────────────────────────────
 

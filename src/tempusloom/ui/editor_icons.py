@@ -461,6 +461,53 @@ def _draw_circle_half_stroke(p: QPainter, s: int) -> None:
     p.setBrush(old_brush)
 
 
+def _draw_image(p: QPainter, s: int) -> None:
+    m = s * 0.14
+    rect = QRectF(m, m, s - 2 * m, s - 2 * m)
+    p.drawRoundedRect(rect, 2, 2)
+    p.drawEllipse(QRectF(s * 0.26, s * 0.28, s * 0.12, s * 0.12))
+    path = QPainterPath()
+    path.moveTo(s * 0.26, s * 0.72)
+    path.lineTo(s * 0.46, s * 0.52)
+    path.lineTo(s * 0.58, s * 0.62)
+    path.lineTo(s * 0.74, s * 0.44)
+    p.drawPath(path)
+
+
+def _draw_sun_medium(p: QPainter, s: int) -> None:
+    cx, cy, r = s / 2, s / 2, s * 0.18
+    p.drawEllipse(QRectF(cx - r, cy - r, 2 * r, 2 * r))
+    inner = s * 0.30
+    outer = s * 0.42
+    for dx, dy in ((0, -1), (1, 0), (0, 1), (-1, 0), (0.7, -0.7), (0.7, 0.7), (-0.7, 0.7), (-0.7, -0.7)):
+        p.drawLine(
+            QPointF(cx + dx * inner, cy + dy * inner),
+            QPointF(cx + dx * outer, cy + dy * outer),
+        )
+
+
+def _draw_thermometer(p: QPainter, s: int) -> None:
+    bulb_r = s * 0.16
+    stem_x = s * 0.50
+    p.drawLine(QPointF(stem_x, s * 0.20), QPointF(stem_x, s * 0.64))
+    p.drawEllipse(QRectF(stem_x - bulb_r, s * 0.62, bulb_r * 2, bulb_r * 2))
+    path = QPainterPath()
+    path.moveTo(s * 0.38, s * 0.24)
+    path.arcTo(QRectF(s * 0.38, s * 0.14, s * 0.24, s * 0.20), 180, -180)
+    path.lineTo(s * 0.62, s * 0.62)
+    p.drawPath(path)
+
+
+def _draw_droplet(p: QPainter, s: int) -> None:
+    path = QPainterPath()
+    path.moveTo(s * 0.50, s * 0.14)
+    path.cubicTo(s * 0.68, s * 0.32, s * 0.80, s * 0.48, s * 0.80, s * 0.62)
+    path.cubicTo(s * 0.80, s * 0.82, s * 0.66, s * 0.90, s * 0.50, s * 0.90)
+    path.cubicTo(s * 0.34, s * 0.90, s * 0.20, s * 0.82, s * 0.20, s * 0.62)
+    path.cubicTo(s * 0.20, s * 0.48, s * 0.32, s * 0.32, s * 0.50, s * 0.14)
+    p.drawPath(path)
+
+
 # ── dispatch table ─────────────────────────────────────────────────────────────
 _DRAW = {
     "mouse-pointer":   _draw_mouse_pointer,
@@ -509,4 +556,8 @@ _DRAW = {
     "layers":               _draw_layers,
     "clock":                _draw_clock,
     "circle-half-stroke":   _draw_circle_half_stroke,
+    "image":                _draw_image,
+    "sun-medium":           _draw_sun_medium,
+    "thermometer":          _draw_thermometer,
+    "droplet":              _draw_droplet,
 }
