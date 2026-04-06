@@ -27,6 +27,8 @@ from PyQt6.QtWidgets import (
 )
 
 from .editor_icons import icon_pixmap
+from PIL.ImageQt import ImageQt
+from tempusloom.core import TLImage
 
 
 # ── design tokens ──────────────────────────────────────────────────────────────
@@ -1392,6 +1394,11 @@ class ColorWheelWidget(QWidget):
 class RightPanel(QWidget):
     """320 px right panel: panel tabs + layers content."""
 
+    active_layer_changed = pyqtSignal(int)
+    layer_visibility_changed = pyqtSignal(int, bool)
+    layer_opacity_changed = pyqtSignal(int, float)
+    adjust_section_changed = pyqtSignal(str, dict)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFixedWidth(320)
@@ -1401,6 +1408,7 @@ class RightPanel(QWidget):
         self._active_tab = "调整"
         self._active_layer = 0
         self._layer_rows: list[LayerRow] = []
+        self._layer_list_lo: Optional[QVBoxLayout] = None
         self._build()
 
     def _build(self) -> None:
@@ -1577,19 +1585,8 @@ class RightPanel(QWidget):
         layer_list_lo = QVBoxLayout(layer_list_w)
         layer_list_lo.setContentsMargins(0, 0, 0, 0)
         layer_list_lo.setSpacing(2)
-
-        _LAYERS = [
-            ("调整图层", "调整",  "#404040", True,  True),
-            ("文字图层", "文字",  "#2c2c2c", False, False),
-            ("蒙版图层", "蒙版",  "#2c2c2c", False, False),
-            ("背景图层", "图像",  "#5a4f3e", False, True),
-        ]
-        for idx, (name, ltype, tcolor, active, locked) in enumerate(_LAYERS):
-            row = LayerRow(idx, name, ltype, tcolor, active, locked)
-            row.selected.connect(self._on_layer_selected)
-            row.visibility_toggled.connect(self._on_layer_visibility)
-            self._layer_rows.append(row)
-            layer_list_lo.addWidget(row)
+        self._layer_list_lo = layer_list_lo
+        self.set_malayers([])
 
         lo.addWidget(layer_list_w, 1)
 
@@ -1599,14 +1596,50 @@ class RightPanel(QWidget):
 
     def _on_opacity_changed(self, value: int) -> None:
         self._opacity_lbl.setText(f"{value}%")
+        self.layer_opacity_changed.emit(self._active_layer, value / 100.0)
 
     def _on_layer_selected(self, idx: int) -> None:
         for i, row in enumerate(self._layer_rows):
             row.set_active(i == idx)
         self._active_layer = idx
+        self.active_layer_changed.emit(idx)
 
     def _on_layer_visibility(self, idx: int, visible: bool) -> None:
-        pass  # hook for real layer system
+        self.layer_visibility_changed.emit(idx, visible)
+
+    def set_malayers(self, malayers: list) -> None:
+        if self._layer_list_lo is None:
+            return
+        while self._layer_list_lo.count():
+            item = self._layer_list_lo.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._layer_rows.clear()
+
+        if not malayers:
+            placeholder = _lbl("No layers", C_TEXT_4, 12)
+            placeholder.setFixedHeight(36)
+            self._layer_list_lo.addWidget(placeholder)
+            self._opacity_slider.blockSignals(True)
+            self._opacity_slider.setValue(100)
+            self._opacity_slider.blockSignals(False)
+            self._active_layer = 0
+            return
+
+        for idx, malayer in enumerate(malayers):
+            layer_type = getattr(malayer, "tab_id", getattr(malayer, "type_name", "layer"))
+            row = LayerRow(idx, malayer.name, layer_type, "#404040", idx == 0, malayer.locked)
+            row._eye_btn.setChecked(malayer.visible)
+            row.selected.connect(self._on_layer_selected)
+            row.visibility_toggled.connect(self._on_layer_visibility)
+            self._layer_rows.append(row)
+            self._layer_list_lo.addWidget(row)
+
+        self._active_layer = 0
+        self._opacity_slider.blockSignals(True)
+        self._opacity_slider.setValue(int(getattr(malayers[0], "opacity", 1.0) * 100))
+        self._opacity_slider.blockSignals(False)
 
     def _build_layer_actions(self) -> QWidget:
         bar = QWidget()
@@ -1808,6 +1841,7 @@ class RightPanel(QWidget):
         label: str, value: int,
         left_color: str, right_color: str,
         min_val: int, max_val: int, default: int,
+        on_change=None,
     ) -> None:
         """Append a labelled GradientSlider row to *lo*."""
         row = QWidget()
@@ -2319,6 +2353,7 @@ class MainEditorWindow(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._current_tlimage: Optional[TLImage] = None
         self.setStyleSheet(f"background:{C_BG_APP};")
         self._build_ui()
         self._connect_signals()
@@ -2372,6 +2407,34 @@ class MainEditorWindow(QWidget):
 
         self._opts_bar.grid_toggled.connect(self._canvas.set_grid)
         self._opts_bar.ruler_toggled.connect(self._canvas.set_ruler)
+        self._right_panel.layer_visibility_changed.connect(self._on_layer_visibility_changed)
+        self._right_panel.layer_opacity_changed.connect(self._on_layer_opacity_changed)
+        self._right_panel.adjust_section_changed.connect(self._on_adjust_section_changed)
+
+    def open_image(self, path: str) -> bool:
+        try:
+            tl_image = TLImage.open(path)
+            pixmap = self._render_tlimage_to_pixmap(tl_image)
+        except Exception:
+            return False
+
+        self._current_tlimage = tl_image
+        self._canvas.set_pixmap(pixmap)
+        self._right_panel.set_malayers(tl_image.malayers)
+        self.title_changed.emit(f"TempusLoom - {Path(path).name}")
+        self._status_bar.set_image_info(pixmap.width(), pixmap.height())
+        return True
+
+    def _render_tlimage_to_pixmap(self, tl_image: TLImage) -> QPixmap:
+        return QPixmap.fromImage(ImageQt(tl_image.render()))
+
+    def _refresh_canvas_from_tlimage(self) -> None:
+        if self._current_tlimage is None:
+            return
+        pixmap = self._render_tlimage_to_pixmap(self._current_tlimage)
+        self._canvas.set_pixmap(pixmap)
+        self._status_bar.set_image_info(pixmap.width(), pixmap.height())
+        self._right_panel.set_malayers(self._current_tlimage.malayers)
 
     def _setup_shortcuts(self) -> None:
         from PyQt6.QtGui import QShortcut
@@ -2382,45 +2445,60 @@ class MainEditorWindow(QWidget):
         QShortcut(QKeySequence("Ctrl+S"), self, self._save_image)
         QShortcut(QKeySequence("Ctrl+Shift+E"), self, self._export_image)
 
-    # ── action handlers ───────────────────────────────────────────────────────
+    # action handlers
     def _open_image(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "打开图像",
+            self, "Open Image",
             str(Path.home() / "Pictures"),
-            "图像文件 (*.jpg *.jpeg *.png *.webp *.tiff *.tif *.bmp *.heic "
-            "*.raw *.cr2 *.nef *.arw *.dng);;所有文件 (*)",
+            "Images (*.jpg *.jpeg *.png *.webp *.tiff *.tif *.bmp *.heic *.raw *.cr2 *.nef *.arw *.dng);;All Files (*)",
         )
         if not path:
             return
-        if self._canvas.load_image(path):
-            self.title_changed.emit(f"TempusLoom – {Path(path).name}")
-            px = self._canvas._pixmap
-            if px:
-                self._status_bar.set_image_info(px.width(), px.height())
-        else:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "无法打开", f"不支持的格式：\n{path}")
+        if self.open_image(path):
+            return
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.warning(self, "Open Failed", f"Unsupported or broken image file:\n{path}")
 
     def _save_image(self) -> None:
-        # placeholder – integrate with actual editing pipeline
         pass
 
     def _export_image(self) -> None:
-        if not self._canvas._pixmap:
+        if self._current_tlimage is None:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出图像",
+            self, "Export Image",
             str(Path.home() / "Desktop" / "export.jpg"),
             "JPEG (*.jpg *.jpeg);;PNG (*.png);;WebP (*.webp);;TIFF (*.tiff)",
         )
         if path:
-            self._canvas._pixmap.save(path)
+            self._current_tlimage.render_to_path(path)
 
     def _undo(self) -> None:
         pass   # hook into editing history
 
     def _redo(self) -> None:
         pass   # hook into editing history
+
+    def _on_layer_visibility_changed(self, idx: int, visible: bool) -> None:
+        if self._current_tlimage is None or idx >= len(self._current_tlimage.malayers):
+            return
+        self._current_tlimage.malayers[idx].visible = visible
+        self._refresh_canvas_from_tlimage()
+
+    def _on_layer_opacity_changed(self, idx: int, opacity: float) -> None:
+        if self._current_tlimage is None or idx >= len(self._current_tlimage.malayers):
+            return
+        self._current_tlimage.malayers[idx].opacity = opacity
+        self._refresh_canvas_from_tlimage()
+
+    def _on_adjust_section_changed(self, section: str, values: dict) -> None:
+        if self._current_tlimage is None:
+            return
+        layer = self._current_tlimage.get_primary_malayer_for_tab("adjust")
+        if layer is None or not hasattr(layer, "update_section"):
+            return
+        layer.update_section(section, **values)
+        self._refresh_canvas_from_tlimage()
 
     def _on_zoom_changed(self, pct: int) -> None:
         self._opts_bar.set_zoom(pct)
