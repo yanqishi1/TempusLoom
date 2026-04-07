@@ -369,6 +369,48 @@ class AdjustmentMalayer(TabMalayer):
         self.params.hsl.saturation = self.params.basic.saturation
         self.params.hsl.vibrance = self.params.basic.vibrance
 
+    @staticmethod
+    def _normalize_white_balance_temperature(value: Any) -> float:
+        """Normalize UI white-balance temperature input to an internal Kelvin-like value.
+
+        Current UI sends a relative slider value in ``[-100, 100]`` instead of a
+        physical Kelvin temperature. The rendering pipeline, however, stores white
+        balance temperature around a daylight reference of ``6500K``.
+
+        Mapping strategy used here:
+
+        1. Treat ``0`` as neutral daylight ``6500K``.
+        2. Map one UI step to ``45K``.
+        3. Therefore ``-100`` -> ``2000K`` and ``+100`` -> ``11000K``.
+        4. Clamp the final result into a broader safe range ``[2000K, 50000K]`` so
+           future callers may still pass absolute Kelvin values directly.
+
+        Notes
+        -----
+        - This is an interaction mapping, not the white-balance algorithm itself.
+        - If a caller already passes an absolute Kelvin value outside ``[-100, 100]``,
+          we keep it as-is and only clamp it.
+        """
+        temperature = float(value)
+        if -100.0 <= temperature <= 100.0:
+            temperature = 6500.0 + temperature * 45.0
+        return _clamp(temperature, 2000.0, 50000.0)
+
+    @staticmethod
+    def _normalize_white_balance_tint(value: Any) -> float:
+        """Normalize UI tint input to the internal green/magenta correction range.
+
+        UI exposes tint in ``[-100, 100]`` for usability, while the adjustment model
+        stores tint in ``[-150, 150]``. We therefore scale the UI value by ``1.5``.
+
+        Negative values push the image towards green; positive values push it towards
+        magenta. The result is clamped to the supported internal range.
+        """
+        tint = float(value)
+        if -100.0 <= tint <= 100.0:
+            tint *= 1.5
+        return _clamp(tint, -150.0, 150.0)
+
     def get_section_params(self, section: str | AdjustmentSection) -> Any:
         value = section.value if isinstance(section, AdjustmentSection) else section
         mapping = {
@@ -388,11 +430,23 @@ class AdjustmentMalayer(TabMalayer):
         return mapping[value]
 
     def update_section(self, section: str | AdjustmentSection, **values: Any) -> None:
-        target = self.get_section_params(section)
-        for key, value in values.items():
+        section_value = section.value if isinstance(section, AdjustmentSection) else section
+        normalized_values = dict(values)
+        if section_value == AdjustmentSection.WHITE_BALANCE.value:
+            if "temperature" in normalized_values:
+                normalized_values["temperature"] = self._normalize_white_balance_temperature(
+                    normalized_values["temperature"]
+                )
+            if "tint" in normalized_values:
+                normalized_values["tint"] = self._normalize_white_balance_tint(
+                    normalized_values["tint"]
+                )
+
+        target = self.get_section_params(section_value)
+        for key, value in normalized_values.items():
             if hasattr(target, key):
                 setattr(target, key, value)
-        if section in {AdjustmentSection.BASIC, AdjustmentSection.BASIC.value}:
+        if section_value == AdjustmentSection.BASIC.value:
             self._sync_basic_to_pipeline()
 
     def apply(self, image: Image.Image, original_image: Optional[Image.Image] = None) -> Image.Image:
@@ -405,6 +459,60 @@ class AdjustmentMalayer(TabMalayer):
         return result
 
     def _apply_white_balance(self, image: Image.Image) -> Image.Image:
+        """Apply a lightweight white-balance approximation in RGB space.
+
+        Algorithm overview
+        ------------------
+        This implementation is intentionally simple and fast. It does *not* perform a
+        full camera-raw style white-balance transform based on sensor metadata,
+        chromatic adaptation matrices, or Planckian-locus fitting. Instead, it uses a
+        practical approximation based on per-channel gain scaling:
+
+        1. Convert the image to ``RGB`` and keep alpha aside.
+        2. Compute a normalized temperature offset relative to neutral daylight:
+
+           ``temp_shift = (temperature - 6500) / 6500``
+
+           Meaning:
+           - ``temperature = 6500``  -> neutral, ``temp_shift = 0``
+           - warmer image            -> positive shift
+           - cooler image            -> negative shift
+
+        3. Compute a normalized tint offset:
+
+           ``tint_shift = tint / 150``
+
+           Meaning:
+           - negative -> greener
+           - positive -> more magenta
+
+        4. Convert these offsets into channel gains:
+
+           - Red   gain: ``1 + temp_shift * 0.12``
+           - Blue  gain: ``1 - temp_shift * 0.12``
+           - Green gain: ``1 + tint_shift * 0.08``
+
+           Interpretation:
+           - warming increases red and decreases blue
+           - cooling does the opposite
+           - tint adjusts the green channel to simulate the green↔magenta axis
+
+        5. Clamp the RGB result to ``[0, 255]`` and restore the original alpha.
+
+        Why this works
+        --------------
+        Human perception of "warmer/cooler" is dominated by the red/blue balance, and
+        tint is commonly modeled along the green/magenta axis. A multiplicative gain on
+        these channels gives a visually plausible result for a photo editor preview.
+
+        Important limitations
+        ---------------------
+        - The transform happens directly in display RGB, not in a linear-light space.
+        - It is an approximation, not a physically accurate Kelvin-to-RGB model.
+        - The coefficients ``0.12`` and ``0.08`` are tuned for moderate, stable UI
+          behavior rather than scientific correctness.
+        - Extreme values may clip highlights/shadows because this is a gain-based edit.
+        """
         rgb = np.asarray(image.convert("RGB"), dtype=np.float32)
         temp_shift = (self.params.white_balance.temperature - 6500.0) / 6500.0
         tint_shift = self.params.white_balance.tint / 150.0

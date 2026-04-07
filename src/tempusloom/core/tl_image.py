@@ -12,6 +12,8 @@ from .malayer import AdjustmentMalayer, EditorTab, Malayer, filter_malayers_by_t
 
 @dataclass
 class TLImage:
+    PREVIEW_MAX_EDGE = 1600
+
     image_path: str
     malayers: List[Malayer] = field(default_factory=list)
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -19,6 +21,8 @@ class TLImage:
     rating: int = 0
     tags: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    _original_image_cache: Optional[Image.Image] = field(default=None, init=False, repr=False, compare=False)
+    _preview_image_cache: Optional[Image.Image] = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.name is None:
@@ -32,7 +36,34 @@ class TLImage:
         )
 
     def load_image(self) -> Image.Image:
-        return Image.open(self.image_path).convert("RGBA")
+        return self._get_original_image().copy()
+
+    def load_preview_image(self) -> Image.Image:
+        return self._get_preview_image().copy()
+
+    def get_image_size(self) -> tuple[int, int]:
+        return self._get_original_image().size
+
+    def _get_original_image(self) -> Image.Image:
+        if self._original_image_cache is None:
+            self._original_image_cache = Image.open(self.image_path).convert("RGBA")
+        return self._original_image_cache
+
+    def _get_preview_image(self) -> Image.Image:
+        if self._preview_image_cache is None:
+            original = self._get_original_image()
+            width, height = original.size
+            longest_edge = max(width, height)
+            if longest_edge <= self.PREVIEW_MAX_EDGE:
+                self._preview_image_cache = original.copy()
+            else:
+                scale = self.PREVIEW_MAX_EDGE / float(longest_edge)
+                preview_size = (
+                    max(1, int(round(width * scale))),
+                    max(1, int(round(height * scale))),
+                )
+                self._preview_image_cache = original.resize(preview_size, Image.Resampling.LANCZOS)
+        return self._preview_image_cache
 
     def add_malayer(self, malayer: Malayer, index: Optional[int] = None) -> None:
         if index is None:
@@ -61,8 +92,8 @@ class TLImage:
         layers = self.get_malayers_for_tab(tab)
         return layers[0] if layers else None
 
-    def render(self) -> Image.Image:
-        original = self.load_image()
+    def render(self, *, preview: bool = True) -> Image.Image:
+        original = self._get_preview_image() if preview else self._get_original_image()
         composed = original.copy()
         for malayer in self.malayers:
             composed = malayer.render(composed, original_image=original)
@@ -71,7 +102,7 @@ class TLImage:
     def render_to_path(self, output_path: str, *, format: Optional[str] = None) -> str:
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
-        image = self.render()
+        image = self.render(preview=False)
         save_image = image.convert("RGB") if output.suffix.lower() in {".jpg", ".jpeg"} else image
         save_image.save(output, format=format)
         return str(output)

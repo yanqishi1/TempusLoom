@@ -1013,7 +1013,7 @@ class GradientSlider(QWidget):
         self._max   = max_val
         self._value = value
         self.setFixedHeight(28)
-        self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def value(self) -> int:
         return self._value
@@ -2168,10 +2168,16 @@ class RightPanel(QWidget):
         # 色温: cool (blue-purple) → warm (yellow)
         self._add_gradient_slider_row(
             lo, "色温", 0, "#9988ff", "#ffcc44", -100, 100, 0,
+            on_change=lambda value: self.adjust_section_changed.emit(
+                "white_balance", {"temperature": value}
+            ),
         )
         # 色调: green → magenta
         self._add_gradient_slider_row(
             lo, "色调", 0, "#44bb44", "#cc44cc", -100, 100, 0,
+            on_change=lambda value: self.adjust_section_changed.emit(
+                "white_balance", {"tint": value}
+            ),
         )
 
     def _add_gradient_slider_row(
@@ -2201,7 +2207,12 @@ class RightPanel(QWidget):
         row_lo.addWidget(top)
 
         slider = GradientSlider(left_color, right_color, min_val, max_val, value)
-        slider.value_changed.connect(lambda v, lb=val_lbl: lb.setText(str(v)))
+        def _handle_value_changed(v: int, lb=val_lbl, cb=on_change) -> None:
+            lb.setText(str(v))
+            if cb is not None:
+                cb(v)
+
+        slider.value_changed.connect(_handle_value_changed)
         row_lo.addWidget(slider)
 
         lo.addWidget(row)
@@ -2692,6 +2703,10 @@ class MainEditorWindow(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._current_tlimage: Optional[TLImage] = None
+        self._adjust_preview_timer = QTimer(self)
+        self._adjust_preview_timer.setSingleShot(True)
+        self._adjust_preview_timer.setInterval(33)
+        self._adjust_preview_timer.timeout.connect(self._refresh_canvas_from_tlimage)
         self.setStyleSheet(f"background:{C_BG_APP};")
         self._build_ui()
         self._connect_signals()
@@ -2756,23 +2771,25 @@ class MainEditorWindow(QWidget):
         except Exception:
             return False
 
+        self._adjust_preview_timer.stop()
         self._current_tlimage = tl_image
         self._canvas.set_pixmap(pixmap)
         self._right_panel.set_malayers(tl_image.malayers)
         self.title_changed.emit(f"TempusLoom - {Path(path).name}")
-        self._status_bar.set_image_info(pixmap.width(), pixmap.height())
+        width, height = tl_image.get_image_size()
+        self._status_bar.set_image_info(width, height)
         return True
 
     def _render_tlimage_to_pixmap(self, tl_image: TLImage) -> QPixmap:
-        return QPixmap.fromImage(ImageQt(tl_image.render()))
+        return QPixmap.fromImage(ImageQt(tl_image.render(preview=True)))
 
     def _refresh_canvas_from_tlimage(self) -> None:
         if self._current_tlimage is None:
             return
         pixmap = self._render_tlimage_to_pixmap(self._current_tlimage)
         self._canvas.set_pixmap(pixmap)
-        self._status_bar.set_image_info(pixmap.width(), pixmap.height())
-        self._right_panel.set_malayers(self._current_tlimage.malayers)
+        width, height = self._current_tlimage.get_image_size()
+        self._status_bar.set_image_info(width, height)
 
     def _setup_shortcuts(self) -> None:
         from PyQt6.QtGui import QShortcut
@@ -2836,7 +2853,7 @@ class MainEditorWindow(QWidget):
         if layer is None or not hasattr(layer, "update_section"):
             return
         layer.update_section(section, **values)
-        self._refresh_canvas_from_tlimage()
+        self._adjust_preview_timer.start()
 
     def _on_zoom_changed(self, pct: int) -> None:
         self._opts_bar.set_zoom(pct)
