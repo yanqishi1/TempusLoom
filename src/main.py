@@ -545,7 +545,7 @@ class TempusLoomWindow(QMainWindow):
 
     def _on_open_in_editor(self, path: str) -> None:
         if path:
-            self._editor._canvas.load_image(path)
+            self._editor.open_image(path)
         self._on_mode("editor")
 
     # ── cross-fade ─────────────────────────────────────────────────────────────
