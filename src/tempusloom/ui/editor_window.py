@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import os
 import math
+import multiprocessing as mp
 from pathlib import Path
-from typing import Optional
+from queue import Empty
+from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import (
     Qt, QSize, QRectF, QPointF, QTimer, pyqtSignal,
@@ -29,6 +31,7 @@ from PyQt6.QtWidgets import (
 from .editor_icons import icon_pixmap
 from PIL.ImageQt import ImageQt
 from tempusloom.core import TLImage
+from tempusloom.core.histogram_process import histogram_worker_main
 
 
 # ── design tokens ──────────────────────────────────────────────────────────────
@@ -551,7 +554,9 @@ class CanvasArea(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
 
-        self._pixmap:  Optional[QPixmap] = None
+        self._edited_pixmap: Optional[QPixmap] = None
+        self._original_pixmap: Optional[QPixmap] = None
+        self._compare_mode = False
         self._zoom    = 75        # percent
         self._offset  = QPointF(0, 0)
         self._panning = False
@@ -572,32 +577,88 @@ class CanvasArea(QWidget):
         )
         placeholder_lo = QVBoxLayout(self)
         placeholder_lo.addWidget(self._placeholder)
+
+        self._compare_btn = QPushButton(self)
+        self._compare_btn.setFixedSize(36, 36)
+        self._compare_btn.setIcon(_qicon("compare", 18, C_TEXT_1))
+        self._compare_btn.setIconSize(QSize(18, 18))
+        self._compare_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._compare_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._compare_btn.setStyleSheet(
+            f"QPushButton{{background:{C_BG_ITEM}; border:1px solid {C_BORDER}; border-radius:10px;}}"
+            f"QPushButton:hover{{background:#343434;}}"
+            f"QPushButton:pressed{{background:#3d3d3d;}}"
+        )
+        self._compare_btn.setToolTip("按住查看原图")
+        self._compare_btn.pressed.connect(self._show_original_preview)
+        self._compare_btn.released.connect(self._show_edited_preview)
+        self._compare_btn.hide()
         self.setAcceptDrops(True)
+
+    def _display_pixmap(self) -> Optional[QPixmap]:
+        if self._compare_mode and self._original_pixmap and not self._original_pixmap.isNull():
+            return self._original_pixmap
+        return self._edited_pixmap
+
+    def _base_pixmap(self) -> Optional[QPixmap]:
+        return self._edited_pixmap or self._display_pixmap()
+
+    def _show_original_preview(self) -> None:
+        if self._original_pixmap and not self._original_pixmap.isNull():
+            self._compare_mode = True
+            self.update()
+
+    def _show_edited_preview(self) -> None:
+        if self._compare_mode:
+            self._compare_mode = False
+            self.update()
+
+    def _position_compare_button(self) -> None:
+        margin = 16
+        self._compare_btn.move(self.width() - self._compare_btn.width() - margin,
+                               self.height() - self._compare_btn.height() - margin)
 
     # ── image loading ──────────────────────────────────────────────────────────
     def load_image(self, path: str) -> bool:
         px = QPixmap(path)
         if px.isNull():
             return False
-        self._pixmap = px
-        self._placeholder.hide()
-        self._fit_to_window()
+        self.set_pixmaps(px, reset_view=True)
         return True
 
-    def set_pixmap(self, px: QPixmap) -> None:
-        self._pixmap = px
-        if not px.isNull():
+    def set_pixmaps(
+        self,
+        edited: QPixmap,
+        original: Optional[QPixmap] = None,
+        *,
+        reset_view: bool = False,
+    ) -> None:
+        self._edited_pixmap = edited if not edited.isNull() else None
+        self._original_pixmap = original if original and not original.isNull() else None
+        self._compare_mode = False
+        if self._edited_pixmap:
             self._placeholder.hide()
-            self._fit_to_window()
+            self._compare_btn.setVisible(self._original_pixmap is not None)
+            if reset_view:
+                self._fit_to_window()
+            else:
+                self.update()
+        else:
+            self._compare_btn.hide()
+        self._position_compare_button()
+
+    def set_pixmap(self, px: QPixmap, *, reset_view: bool = False) -> None:
+        self.set_pixmaps(px, reset_view=reset_view)
 
     def _fit_to_window(self) -> None:
-        if not self._pixmap:
+        px = self._base_pixmap()
+        if not px:
             return
         w, h = self.width(), self.height()
         if w < 10 or h < 10:
             return
-        scale_w = (w - 40) / self._pixmap.width()
-        scale_h = (h - 40) / self._pixmap.height()
+        scale_w = (w - 40) / px.width()
+        scale_h = (h - 40) / px.height()
         scale = min(scale_w, scale_h, 1.0)
         self._zoom = max(self._MIN_ZOOM, min(self._MAX_ZOOM, int(scale * 100)))
         self._center_image()
@@ -605,10 +666,11 @@ class CanvasArea(QWidget):
         self.update()
 
     def _center_image(self) -> None:
-        if not self._pixmap:
+        px = self._base_pixmap()
+        if not px:
             return
-        iw = self._pixmap.width()  * self._zoom / 100
-        ih = self._pixmap.height() * self._zoom / 100
+        iw = px.width()  * self._zoom / 100
+        ih = px.height() * self._zoom / 100
         self._offset = QPointF(
             (self.width()  - iw) / 2,
             (self.height() - ih) / 2,
@@ -628,9 +690,10 @@ class CanvasArea(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        if self._pixmap and not self._pixmap.isNull():
-            iw = self._pixmap.width()  * self._zoom / 100
-            ih = self._pixmap.height() * self._zoom / 100
+        px = self._display_pixmap()
+        if px and not px.isNull():
+            iw = px.width()  * self._zoom / 100
+            ih = px.height() * self._zoom / 100
             dest = QRectF(self._offset.x(), self._offset.y(), iw, ih)
 
             # drop shadow
@@ -642,7 +705,7 @@ class CanvasArea(QWidget):
             clip = QPainterPath()
             clip.addRoundedRect(dest, 4, 4)
             p.setClipPath(clip)
-            p.drawPixmap(dest.toRect(), self._pixmap)
+            p.drawPixmap(dest.toRect(), px)
             p.setClipping(False)
 
             # grid overlay
@@ -661,7 +724,8 @@ class CanvasArea(QWidget):
 
     # ── events ────────────────────────────────────────────────────────────────
     def resizeEvent(self, _event) -> None:             # noqa: N802
-        if self._pixmap:
+        self._position_compare_button()
+        if self._base_pixmap():
             self._fit_to_window()
 
     def wheelEvent(self, event: QWheelEvent) -> None:  # noqa: N802
@@ -933,8 +997,9 @@ class _ClickableHeader(QWidget):
 
 
 class _HistogramCanvas(QWidget):
-    """Paints a realistic R/G/B stacked-bar histogram."""
+    """Paints an overlaid R/G/B histogram from image data."""
     _H = 96
+    _BINS = 128
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -942,26 +1007,22 @@ class _HistogramCanvas(QWidget):
         self.setStyleSheet(
             f"background:{C_BG_ITEM}; border-radius:6px;"
         )
-        # pre-bake pseudo-histogram data (128 bins, realistic distribution)
-        import random
-        rng = random.Random(42)
-        bins = 128
+        self._r = [0.0] * self._BINS
+        self._g = [0.0] * self._BINS
+        self._b = [0.0] * self._BINS
 
-        def _make_channel(peak1, peak2, spread):
-            data = []
-            for i in range(bins):
-                t = i / (bins - 1)
-                v = (math.exp(-0.5 * ((t - peak1) / spread) ** 2) * 0.7 +
-                     math.exp(-0.5 * ((t - peak2) / spread) ** 2) * 0.4 +
-                     rng.uniform(0, 0.08))
-                data.append(v)
-            # normalise
-            mx = max(data) or 1.0
-            return [x / mx for x in data]
-
-        self._r = _make_channel(0.25, 0.72, 0.12)
-        self._g = _make_channel(0.35, 0.68, 0.13)
-        self._b = _make_channel(0.20, 0.60, 0.14)
+    def set_histogram_data(self, histogram: Optional[dict[str, list[float]]]) -> None:
+        histogram = histogram or {}
+        self._r = list(histogram.get("red", self._r))[: self._BINS]
+        self._g = list(histogram.get("green", self._g))[: self._BINS]
+        self._b = list(histogram.get("blue", self._b))[: self._BINS]
+        if len(self._r) < self._BINS:
+            self._r.extend([0.0] * (self._BINS - len(self._r)))
+        if len(self._g) < self._BINS:
+            self._g.extend([0.0] * (self._BINS - len(self._g)))
+        if len(self._b) < self._BINS:
+            self._b.extend([0.0] * (self._BINS - len(self._b)))
+        self.update()
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         p = QPainter(self)
@@ -987,15 +1048,16 @@ class _HistogramCanvas(QWidget):
             path.closeSubpath()
             p.fillPath(path, QBrush(col))
 
-        # subtle top border line
         p.setPen(QPen(QColor(C_BORDER), 1))
         p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 6, 6)
         p.end()
 
 
 class GradientSlider(QWidget):
     """Horizontal slider with a colour-gradient track and a white circle handle."""
     value_changed = pyqtSignal(int)
+    value_committed = pyqtSignal(int)
 
     _TRACK_H = 8
     _HANDLE_R = 7
@@ -1012,18 +1074,20 @@ class GradientSlider(QWidget):
         self._min   = min_val
         self._max   = max_val
         self._value = value
+        self._dragging = False
         self.setFixedHeight(28)
-        self.setCursor(Qt.CursorShape.SizeHorCursor)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def value(self) -> int:
         return self._value
 
-    def setValue(self, v: int) -> None:
+    def setValue(self, v: int, *, emit_signal: bool = True) -> None:
         v = max(self._min, min(self._max, v))
         if v != self._value:
             self._value = v
             self.update()
-            self.value_changed.emit(v)
+            if emit_signal:
+                self.value_changed.emit(v)
 
     # ── geometry helpers ──────────────────────────────────────────────────────
     def _track_info(self):
@@ -1068,11 +1132,19 @@ class GradientSlider(QWidget):
 
     def mousePressEvent(self, e: QMouseEvent) -> None:  # noqa: N802
         if e.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
             self.setValue(self._x_to_value(e.position().x()))
 
     def mouseMoveEvent(self, e: QMouseEvent) -> None:  # noqa: N802
         if e.buttons() & Qt.MouseButton.LeftButton:
             self.setValue(self._x_to_value(e.position().x()))
+
+    def mouseReleaseEvent(self, e: QMouseEvent) -> None:  # noqa: N802
+        if self._dragging and e.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            self.setValue(self._x_to_value(e.position().x()))
+            self.value_committed.emit(self._value)
+        super().mouseReleaseEvent(e)
 
 
 class AdjustSection(QWidget):
@@ -1430,7 +1502,9 @@ class RightPanel(QWidget):
     active_layer_changed = pyqtSignal(int)
     layer_visibility_changed = pyqtSignal(int, bool)
     layer_opacity_changed = pyqtSignal(int, float)
+    layer_opacity_change_finished = pyqtSignal(int, float)
     adjust_section_changed = pyqtSignal(str, dict)
+    adjust_section_change_finished = pyqtSignal(str, dict, str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1440,8 +1514,16 @@ class RightPanel(QWidget):
         )
         self._active_tab = "蒙板"
         self._active_layer = 0
+        self._malayers: list = []
         self._layer_rows: list[LayerRow] = []
         self._layer_list_lo: Optional[QVBoxLayout] = None
+        self._history_list_lo: Optional[QVBoxLayout] = None
+        self._adjust_slider_meta: dict[GradientSlider, dict[str, Any]] = {}
+        self._adjust_value_labels: dict[GradientSlider, QLabel] = {}
+        self._syncing_adjust_controls = False
+        self._histogram_canvas: Optional[_HistogramCanvas] = None
+        self._histogram_meta_labels: list[QLabel] = []
+        self._histogram_format_badge: Optional[QLabel] = None
         self._build()
 
     def _build(self) -> None:
@@ -1595,6 +1677,7 @@ class RightPanel(QWidget):
         self._opacity_slider.setRange(0, 100)
         self._opacity_slider.setValue(100)
         self._opacity_slider.setFixedHeight(4)
+        self._opacity_slider.setCursor(Qt.CursorShape.PointingHandCursor)
         self._opacity_slider.setStyleSheet(
             f"QSlider::groove:horizontal{{background:{C_BG_ITEM};"
             f"height:4px; border-radius:2px;}}"
@@ -1605,6 +1688,7 @@ class RightPanel(QWidget):
             f"border-radius:6px; margin:-4px 0;}}"
         )
         self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        self._opacity_slider.sliderReleased.connect(self._on_opacity_change_finished)
         op_lo.addWidget(self._opacity_slider, 1)
 
         self._opacity_lbl = _lbl("100%", C_TEXT_1, 12, QFont.Weight.Medium)
@@ -1632,10 +1716,18 @@ class RightPanel(QWidget):
         self._opacity_lbl.setText(f"{value}%")
         self.layer_opacity_changed.emit(self._active_layer, value / 100.0)
 
+    def _on_opacity_change_finished(self) -> None:
+        self.layer_opacity_change_finished.emit(self._active_layer, self._opacity_slider.value() / 100.0)
+
     def _on_layer_selected(self, idx: int) -> None:
         for i, row in enumerate(self._layer_rows):
             row.set_active(i == idx)
         self._active_layer = idx
+        if 0 <= idx < len(self._malayers):
+            self._opacity_slider.blockSignals(True)
+            self._opacity_slider.setValue(int(getattr(self._malayers[idx], "opacity", 1.0) * 100))
+            self._opacity_slider.blockSignals(False)
+            self._opacity_lbl.setText(f"{self._opacity_slider.value()}%")
         self.active_layer_changed.emit(idx)
 
     def _on_layer_visibility(self, idx: int, visible: bool) -> None:
@@ -1644,6 +1736,7 @@ class RightPanel(QWidget):
     def set_malayers(self, malayers: list) -> None:
         if self._layer_list_lo is None:
             return
+        self._malayers = list(malayers)
         while self._layer_list_lo.count():
             item = self._layer_list_lo.takeAt(0)
             widget = item.widget()
@@ -1658,6 +1751,7 @@ class RightPanel(QWidget):
             self._opacity_slider.blockSignals(True)
             self._opacity_slider.setValue(100)
             self._opacity_slider.blockSignals(False)
+            self._opacity_lbl.setText("100%")
             self._active_layer = 0
             return
 
@@ -1674,6 +1768,121 @@ class RightPanel(QWidget):
         self._opacity_slider.blockSignals(True)
         self._opacity_slider.setValue(int(getattr(malayers[0], "opacity", 1.0) * 100))
         self._opacity_slider.blockSignals(False)
+        self._opacity_lbl.setText(f"{self._opacity_slider.value()}%")
+
+    def set_history_entries(self, entries: list[dict[str, Any]]) -> None:
+        if self._history_list_lo is None:
+            return
+        while self._history_list_lo.count():
+            item = self._history_list_lo.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        if not entries:
+            self._history_list_lo.addWidget(_lbl("暂无历史记录", C_TEXT_4, 12))
+            self._history_list_lo.addStretch()
+            return
+
+        for entry in entries:
+            self._history_list_lo.addWidget(
+                self._build_history_row(
+                    "clock",
+                    str(entry.get("description", "未命名操作")),
+                    None,
+                    bool(entry.get("active", False)),
+                )
+            )
+        self._history_list_lo.addStretch()
+
+    def set_edit_state(self, edit_state: dict[str, Any]) -> None:
+        adjust_state = edit_state.get("adjust", {}) if isinstance(edit_state, dict) else {}
+        self._syncing_adjust_controls = True
+        try:
+            for slider, meta in self._adjust_slider_meta.items():
+                raw_value = self._read_nested_value(adjust_state, meta["state_path"])
+                if raw_value is None:
+                    continue
+                slider_value = meta["to_slider"](raw_value)
+                slider.setValue(int(round(slider_value)), emit_signal=False)
+                self._adjust_value_labels[slider].setText(str(int(round(slider.value()))))
+        finally:
+            self._syncing_adjust_controls = False
+
+    def set_histogram_data(self, histogram: Optional[dict[str, list[float]]]) -> None:
+        if self._histogram_canvas is not None:
+            self._histogram_canvas.set_histogram_data(histogram)
+
+    def set_histogram_metadata(self, metadata: Optional[dict[str, Any]]) -> None:
+        values = metadata or {}
+        labels = [
+            f"ISO {values.get('iso', '—')}",
+            str(values.get("focal_length", "—")),
+            str(values.get("aperture", "—")),
+            str(values.get("exposure_time", "—")),
+        ]
+        for label_widget, text in zip(self._histogram_meta_labels, labels):
+            label_widget.setText(text)
+        if self._histogram_format_badge is not None:
+            self._histogram_format_badge.setText(str(values.get("format", "IMG")))
+
+    def _register_adjust_slider(
+        self,
+        slider: GradientSlider,
+        value_label: QLabel,
+        *,
+        section: str,
+        param_path: str,
+        display_label: str,
+        to_model: Optional[Callable[[int], Any]] = None,
+        to_slider: Optional[Callable[[Any], float]] = None,
+    ) -> None:
+        self._adjust_slider_meta[slider] = {
+            "section": section,
+            "param_path": param_path,
+            "state_path": f"{section}.{param_path}",
+            "display_label": display_label,
+            "to_model": to_model or (lambda value: value),
+            "to_slider": to_slider or (lambda value: float(value)),
+        }
+        self._adjust_value_labels[slider] = value_label
+        slider.value_changed.connect(lambda value, s=slider: self._on_adjust_slider_preview(s, value))
+        slider.value_committed.connect(lambda value, s=slider: self._on_adjust_slider_commit(s, value))
+
+    def _on_adjust_slider_preview(self, slider: GradientSlider, value: int) -> None:
+        if self._syncing_adjust_controls:
+            return
+        self._emit_adjust_slider_change(slider, value, committed=False)
+
+    def _on_adjust_slider_commit(self, slider: GradientSlider, value: int) -> None:
+        if self._syncing_adjust_controls:
+            return
+        self._emit_adjust_slider_change(slider, value, committed=True)
+
+    def _emit_adjust_slider_change(self, slider: GradientSlider, value: int, *, committed: bool) -> None:
+        meta = self._adjust_slider_meta.get(slider)
+        if meta is None:
+            return
+        payload = self._build_nested_payload(meta["param_path"], meta["to_model"](value))
+        if committed:
+            self.adjust_section_change_finished.emit(meta["section"], payload, meta["display_label"])
+        else:
+            self.adjust_section_changed.emit(meta["section"], payload)
+
+    def _build_nested_payload(self, path: str, value: Any) -> dict[str, Any]:
+        parts = path.split(".")
+        payload: Any = value
+        for part in reversed(parts):
+            payload = {part: payload}
+        return payload
+
+    def _read_nested_value(self, mapping: dict[str, Any], path: str) -> Any:
+        current: Any = mapping
+        for part in path.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return None
+            current = current[part]
+        return current
 
     def _build_layer_actions(self) -> QWidget:
         bar = QWidget()
@@ -1775,6 +1984,7 @@ class RightPanel(QWidget):
         slider.setRange(0, 100)
         slider.setValue(value)
         slider.setFixedHeight(18)
+        slider.setCursor(Qt.CursorShape.PointingHandCursor)
         slider.setStyleSheet(
             f"QSlider::groove:horizontal{{background:{C_BG_ITEM}; height:4px; border-radius:2px;}}"
             f"QSlider::sub-page:horizontal{{background:{C_PRIMARY}; height:4px; border-radius:2px;}}"
@@ -1973,20 +2183,8 @@ class RightPanel(QWidget):
         lo = QVBoxLayout(body)
         lo.setContentsMargins(16, 18, 16, 16)
         lo.setSpacing(10)
-
-        history_items = [
-            ("image", "原始状态", None, False),
-            ("sun-medium", "调整曝光 +0.5", None, False),
-            ("circle-half-stroke", "调整对比度 +10", None, False),
-            ("thermometer", "调整色温 -5", None, False),
-            ("droplet", "调整饱和度 +8", None, False),
-            ("circle-dashed", "添加蒙版", None, False),
-            ("sparkles", "AI 自动增强", "Just now", True),
-        ]
-        for icon_name, text, meta, active in history_items:
-            lo.addWidget(self._build_history_row(icon_name, text, meta, active))
-
-        lo.addStretch()
+        self._history_list_lo = lo
+        self.set_history_entries([])
         scroll.setWidget(body)
         return scroll
 
@@ -2117,21 +2315,25 @@ class RightPanel(QWidget):
         lo.setContentsMargins(0, 0, 0, 4)
         lo.setSpacing(4)
 
-        lo.addWidget(_HistogramCanvas())
+        self._histogram_canvas = _HistogramCanvas()
+        lo.addWidget(self._histogram_canvas)
 
         exif_row = QWidget()
         exif_lo = QHBoxLayout(exif_row)
         exif_lo.setContentsMargins(2, 0, 2, 0)
         exif_lo.setSpacing(8)
-        for txt in ("ISO 100", "129mm", "F/2.8", "1/200s"):
-            exif_lo.addWidget(_lbl(txt, C_TEXT_4, 11))
+        self._histogram_meta_labels = []
+        for txt in ("ISO —", "—", "—", "—"):
+            label = _lbl(txt, C_TEXT_4, 11)
+            self._histogram_meta_labels.append(label)
+            exif_lo.addWidget(label)
 
-        jpg_lbl = QLabel("JPG")
-        jpg_lbl.setStyleSheet(
+        self._histogram_format_badge = QLabel("IMG")
+        self._histogram_format_badge.setStyleSheet(
             f"color:{C_TEXT_3}; background:{C_BG_ITEM}; font-size:10px;"
             "border-radius:3px; padding:1px 5px;"
         )
-        exif_lo.addWidget(jpg_lbl)
+        exif_lo.addWidget(self._histogram_format_badge)
         exif_lo.addStretch()
         lo.addWidget(exif_row)
         return w
@@ -2168,10 +2370,18 @@ class RightPanel(QWidget):
         # 色温: cool (blue-purple) → warm (yellow)
         self._add_gradient_slider_row(
             lo, "色温", 0, "#9988ff", "#ffcc44", -100, 100, 0,
+            section="white_balance",
+            param_path="temperature",
+            display_label="白平衡 · 色温",
+            to_model=lambda value: int(6500 + value * 35),
+            to_slider=lambda value: (float(value) - 6500.0) / 35.0,
         )
         # 色调: green → magenta
         self._add_gradient_slider_row(
             lo, "色调", 0, "#44bb44", "#cc44cc", -100, 100, 0,
+            section="white_balance",
+            param_path="tint",
+            display_label="白平衡 · 色调",
         )
 
     def _add_gradient_slider_row(
@@ -2180,6 +2390,12 @@ class RightPanel(QWidget):
         left_color: str, right_color: str,
         min_val: int, max_val: int, default: int,
         on_change=None,
+        *,
+        section: Optional[str] = None,
+        param_path: Optional[str] = None,
+        display_label: Optional[str] = None,
+        to_model: Optional[Callable[[int], Any]] = None,
+        to_slider: Optional[Callable[[Any], float]] = None,
     ) -> None:
         """Append a labelled GradientSlider row to *lo*."""
         row = QWidget()
@@ -2204,23 +2420,54 @@ class RightPanel(QWidget):
         slider.value_changed.connect(lambda v, lb=val_lbl: lb.setText(str(v)))
         row_lo.addWidget(slider)
 
+        if section and param_path:
+            self._register_adjust_slider(
+                slider,
+                val_lbl,
+                section=section,
+                param_path=param_path,
+                display_label=display_label or label,
+                to_model=to_model,
+                to_slider=to_slider,
+            )
+
         lo.addWidget(row)
 
     # ── 影调 section ──────────────────────────────────────────────────────────
 
     def _build_tone_content(self, lo: QVBoxLayout) -> None:
-        """Tone section: 曝光/对比度/亮度/高光/阴影/白色/黑色."""
+        """Tone section: 曝光/对比度/亮度/高光/阴影/白色/黑色/清晰度/去雾/鲜艳度/饱和度."""
         _SLIDERS = [
-            ("曝光",  0,   "#1a1a1a", "#ffffff", -200, 200),
-            ("对比度", 0,  "#1a1a1a", "#ffffff", -100, 100),
-            ("亮度",  0,   "#1a1a1a", "#f0f0f0", -100, 100),
-            ("高光",  0,   "#888888", "#ffffff", -100, 100),
-            ("阴影",  0,   "#000000", "#888888", -100, 100),
-            ("白色",  0,   "#666666", "#ffffff", -100, 100),
-            ("黑色",  0,   "#000000", "#555555", -100, 100),
+            ("曝光",  0,   "#1a1a1a", "#ffffff", -200, 200, "exposure", lambda value: round(value / 100.0, 2), lambda value: float(value) * 100.0),
+            ("对比度", 0,  "#1a1a1a", "#ffffff", -100, 100, "contrast", None, None),
+            ("亮度",  0,   "#1a1a1a", "#f0f0f0", -100, 100, "brightness", None, None),
+            ("高光",  0,   "#888888", "#ffffff", -100, 100, "highlights", None, None),
+            ("阴影",  0,   "#000000", "#888888", -100, 100, "shadows", None, None),
+            ("白色",  0,   "#666666", "#ffffff", -100, 100, "whites", None, None),
+            ("黑色",  0,   "#000000", "#555555", -100, 100, "blacks", None, None),
+            ("清晰度", 0, "#4a4a4a", "#f5f5f5", -100, 100, "clarity", None, None),
+            ("去雾", 0,   "#5e5e5e", "#d9d9d9", -100, 100, "dehaze", None, None),
         ]
-        for label, val, lc, rc, mn, mx in _SLIDERS:
-            self._add_gradient_slider_row(lo, label, val, lc, rc, mn, mx, 0)
+        for label, val, lc, rc, mn, mx, param_path, to_model, to_slider in _SLIDERS:
+            self._add_gradient_slider_row(
+                lo, label, val, lc, rc, mn, mx, 0,
+                section="tone",
+                param_path=param_path,
+                display_label=f"影调 · {label}",
+                to_model=to_model,
+                to_slider=to_slider,
+            )
+
+        for label, lc, rc, param_path in [
+            ("鲜艳度", "#5a5a5a", "#ffb347", "vibrance"),
+            ("饱和度", "#5a5a5a", "#ff8a65", "saturation"),
+        ]:
+            self._add_gradient_slider_row(
+                lo, label, 0, lc, rc, -100, 100, 0,
+                section="hsl",
+                param_path=param_path,
+                display_label=f"影调 · {label}",
+            )
 
     # ── 色阶 section ──────────────────────────────────────────────────────────
 
@@ -2228,18 +2475,30 @@ class RightPanel(QWidget):
         """Levels section: input/output black-white point sliders."""
         lo.addWidget(_lbl("输入色阶", C_TEXT_3, 11))
         self._add_gradient_slider_row(
-            lo, "暗部", 0, "#000000", "#ffffff", 0, 255, 0
+            lo, "暗部", 0, "#000000", "#ffffff", 0, 255, 0,
+            section="levels",
+            param_path="input_black",
+            display_label="色阶 · 输入暗部",
         )
         self._add_gradient_slider_row(
-            lo, "亮部", 255, "#000000", "#ffffff", 0, 255, 255
+            lo, "亮部", 255, "#000000", "#ffffff", 0, 255, 255,
+            section="levels",
+            param_path="input_white",
+            display_label="色阶 · 输入亮部",
         )
         lo.addSpacing(4)
         lo.addWidget(_lbl("输出色阶", C_TEXT_3, 11))
         self._add_gradient_slider_row(
-            lo, "暗部", 0, "#000000", "#ffffff", 0, 255, 0
+            lo, "暗部", 0, "#000000", "#ffffff", 0, 255, 0,
+            section="levels",
+            param_path="output_black",
+            display_label="色阶 · 输出暗部",
         )
         self._add_gradient_slider_row(
-            lo, "亮部", 255, "#000000", "#ffffff", 0, 255, 255
+            lo, "亮部", 255, "#000000", "#ffffff", 0, 255, 255,
+            section="levels",
+            param_path="output_white",
+            display_label="色阶 · 输出亮部",
         )
 
     # ── 曲线 section ──────────────────────────────────────────────────────────
@@ -2419,15 +2678,20 @@ class RightPanel(QWidget):
         lo.addSpacing(4)
 
         _COLORS = [
-            ("红色",  "#ff44aa", "#ff4444"),
-            ("橙色",  "#ff4400", "#ffaa00"),
-            ("黄色",  "#ffaa00", "#aacc00"),
-            ("绿色",  "#aacc00", "#00bbaa"),
-            ("浅绿色","#00bbaa", "#0088cc"),
-            ("蓝色",  "#0088cc", "#6655ff"),
-            ("紫色",  "#6655ff", "#cc44cc"),
-            ("洋红色","#cc44cc", "#ff44aa"),
+            ("红色",  "red",     "#ff44aa", "#ff4444"),
+            ("橙色",  "orange",  "#ff4400", "#ffaa00"),
+            ("黄色",  "yellow",  "#ffaa00", "#aacc00"),
+            ("绿色",  "green",   "#aacc00", "#00bbaa"),
+            ("浅绿色", "aqua",    "#00bbaa", "#0088cc"),
+            ("蓝色",  "blue",    "#0088cc", "#6655ff"),
+            ("紫色",  "purple",  "#6655ff", "#cc44cc"),
+            ("洋红色", "magenta", "#cc44cc", "#ff44aa"),
         ]
+        mode_paths = {
+            "色相": "hue",
+            "饱和度": "saturation",
+            "明亮度": "luminance",
+        }
 
         for mode in _HSL_TABS:
             grp = QWidget()
@@ -2435,8 +2699,13 @@ class RightPanel(QWidget):
             grp_lo = QVBoxLayout(grp)
             grp_lo.setContentsMargins(0, 0, 0, 0)
             grp_lo.setSpacing(6)
-            for color_name, lc, rc in _COLORS:
-                self._add_gradient_slider_row(grp_lo, color_name, 0, lc, rc, -100, 100, 0)
+            for color_name, color_key, lc, rc in _COLORS:
+                self._add_gradient_slider_row(
+                    grp_lo, color_name, 0, lc, rc, -100, 100, 0,
+                    section="hsl",
+                    param_path=f"{color_key}.{mode_paths[mode]}",
+                    display_label=f"HSL · {color_name} · {mode}",
+                )
             grp.setVisible(mode == "色相")
             self._hsl_slider_groups[mode] = grp
             lo.addWidget(grp)
@@ -2537,6 +2806,7 @@ class RightPanel(QWidget):
             lum.setRange(-100, 100)
             lum.setValue(0)
             lum.setFixedWidth(14)
+            lum.setCursor(Qt.CursorShape.PointingHandCursor)
             lum.setStyleSheet(
                 f"QSlider::groove:vertical{{background:{C_BG_ITEM}; width:4px; border-radius:2px;}}"
                 f"QSlider::handle:vertical{{background:{C_TEXT_4}; width:10px; height:10px;"
@@ -2605,71 +2875,108 @@ class RightPanel(QWidget):
         lo.addWidget(sel_row)
         lo.addSpacing(4)
 
-        for label, lc, rc in [
-            ("青色",   "#00bbcc", "#ff4444"),
-            ("洋红色", "#cc00aa", "#00cc44"),
-            ("黄色",   "#0044cc", "#ffee00"),
-            ("黑色",   "#ffffff", "#000000"),
+        for label, param_path, lc, rc in [
+            ("青色", "cyan", "#00bbcc", "#ff4444"),
+            ("洋红色", "magenta", "#cc00aa", "#00cc44"),
+            ("黄色", "yellow", "#0044cc", "#ffee00"),
+            ("黑色", "black", "#ffffff", "#000000"),
         ]:
-            self._add_gradient_slider_row(lo, label, 0, lc, rc, -100, 100, 0)
+            self._add_gradient_slider_row(
+                lo, label, 0, lc, rc, -100, 100, 0,
+                section="selective_color",
+                param_path=param_path,
+                display_label=f"可选颜色 · {label}",
+            )
 
     # ── 细节 section ──────────────────────────────────────────────────────────
 
     def _build_detail_content(self, lo: QVBoxLayout) -> None:
         """Detail section: sharpening + noise reduction."""
         lo.addWidget(_lbl("锐化", C_TEXT_3, 11))
-        for label, lc, rc in [
-            ("数量",   "#1a1a1a", "#ffffff"),
-            ("半径",   "#1a1a1a", "#ffffff"),
-            ("细节",   "#1a1a1a", "#ffffff"),
-            ("蒙版",   "#1a1a1a", "#ffffff"),
+        for label, param_path, lc, rc in [
+            ("数量", "sharpen_amount", "#1a1a1a", "#ffffff"),
+            ("半径", "sharpen_radius", "#1a1a1a", "#ffffff"),
+            ("细节", "sharpen_threshold", "#1a1a1a", "#ffffff"),
+            ("蒙版", "mask", "#1a1a1a", "#ffffff"),
         ]:
-            self._add_gradient_slider_row(lo, label, 0, lc, rc, 0, 100, 0)
+            self._add_gradient_slider_row(
+                lo, label, 0, lc, rc, 0, 100, 0,
+                section="detail",
+                param_path=param_path,
+                display_label=f"细节 · {label}",
+            )
         lo.addSpacing(4)
         lo.addWidget(_lbl("降噪", C_TEXT_3, 11))
-        for label, lc, rc in [
-            ("明亮度",   "#1a1a1a", "#ffffff"),
-            ("明亮度细节", "#1a1a1a", "#ffffff"),
-            ("颜色",     "#1a1a1a", "#ffffff"),
+        for label, param_path, lc, rc in [
+            ("明亮度", "luminance_noise", "#1a1a1a", "#ffffff"),
+            ("明亮度细节", "luminance_detail", "#1a1a1a", "#ffffff"),
+            ("颜色", "color_noise", "#1a1a1a", "#ffffff"),
         ]:
-            self._add_gradient_slider_row(lo, label, 0, lc, rc, 0, 100, 0)
+            self._add_gradient_slider_row(
+                lo, label, 0, lc, rc, 0, 100, 0,
+                section="detail",
+                param_path=param_path,
+                display_label=f"降噪 · {label}",
+            )
 
     # ── 镜头 section ──────────────────────────────────────────────────────────
 
     def _build_lens_content(self, lo: QVBoxLayout) -> None:
         """Lens correction: distortion, vignette, chromatic aberration."""
-        for label, lc, rc in [
-            ("扭曲校正", "#1a1a1a", "#ffffff"),
-            ("暗角",     "#000000", "#ffffff"),
-            ("暗角中点", "#1a1a1a", "#ffffff"),
-            ("色差",     "#1a1a1a", "#ffffff"),
+        for label, param_path, lc, rc in [
+            ("扭曲校正", "distortion", "#1a1a1a", "#ffffff"),
+            ("暗角", "vignette", "#000000", "#ffffff"),
+            ("暗角中点", "vignette_midpoint", "#1a1a1a", "#ffffff"),
+            ("色差", "chromatic_aberration", "#1a1a1a", "#ffffff"),
         ]:
-            self._add_gradient_slider_row(lo, label, 0, lc, rc, -100, 100, 0)
+            self._add_gradient_slider_row(
+                lo, label, 0, lc, rc, -100, 100, 0,
+                section="lens",
+                param_path=param_path,
+                display_label=f"镜头 · {label}",
+            )
 
     # ── 透视矫正 section ──────────────────────────────────────────────────────
 
     def _build_perspective_content(self, lo: QVBoxLayout) -> None:
         """Perspective transform sliders."""
-        for label, lc, rc in [
-            ("水平",   "#1a1a1a", "#ffffff"),
-            ("垂直",   "#1a1a1a", "#ffffff"),
-            ("旋转",   "#1a1a1a", "#ffffff"),
-            ("缩放",   "#1a1a1a", "#ffffff"),
+        for label, param_path, lc, rc, to_model, to_slider in [
+            ("水平", "horizontal", "#1a1a1a", "#ffffff", None, None),
+            ("垂直", "vertical", "#1a1a1a", "#ffffff", None, None),
+            ("旋转", "rotation", "#1a1a1a", "#ffffff", None, None),
+            ("缩放", "scale", "#1a1a1a", "#ffffff", lambda value: 100 + value, lambda value: float(value) - 100.0),
         ]:
-            self._add_gradient_slider_row(lo, label, 0, lc, rc, -100, 100, 0)
+            self._add_gradient_slider_row(
+                lo, label, 0, lc, rc, -100, 100, 0,
+                section="perspective",
+                param_path=param_path,
+                display_label=f"透视矫正 · {label}",
+                to_model=to_model,
+                to_slider=to_slider,
+            )
 
     # ── 颜色校准 section ──────────────────────────────────────────────────────
 
     def _build_color_calibration_content(self, lo: QVBoxLayout) -> None:
         """Color calibration: per-channel hue/saturation."""
-        for ch, hue_lc, hue_rc in [
-            ("红色原色", "#ff44aa", "#ff4444"),
-            ("绿色原色", "#aacc00", "#00bbaa"),
-            ("蓝色原色", "#0088cc", "#6655ff"),
+        for ch, prefix, hue_lc, hue_rc in [
+            ("红色原色", "red_primary", "#ff44aa", "#ff4444"),
+            ("绿色原色", "green_primary", "#aacc00", "#00bbaa"),
+            ("蓝色原色", "blue_primary", "#0088cc", "#6655ff"),
         ]:
             lo.addWidget(_lbl(ch, C_TEXT_3, 11))
-            self._add_gradient_slider_row(lo, "色相",  0, hue_lc,   hue_rc,   -100, 100, 0)
-            self._add_gradient_slider_row(lo, "饱和度", 0, "#1a1a1a", "#ffffff", -100, 100, 0)
+            self._add_gradient_slider_row(
+                lo, "色相", 0, hue_lc, hue_rc, -100, 100, 0,
+                section="calibration",
+                param_path=f"{prefix}_hue",
+                display_label=f"颜色校准 · {ch} · 色相",
+            )
+            self._add_gradient_slider_row(
+                lo, "饱和度", 0, "#1a1a1a", "#ffffff", -100, 100, 0,
+                section="calibration",
+                param_path=f"{prefix}_sat",
+                display_label=f"颜色校准 · {ch} · 饱和度",
+            )
             lo.addSpacing(2)
 
 
@@ -2688,14 +2995,47 @@ class MainEditorWindow(QWidget):
     """
 
     title_changed = pyqtSignal(str)
+    _PREVIEW_REFRESH_INTERVAL_MS = 24
+    _HISTOGRAM_REFRESH_INTERVAL_MS = 160
+    _MIN_PREVIEW_MAX_DIMENSION = 1600
+    _HISTOGRAM_RENDER_MAX_DIMENSION = 480
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._current_tlimage: Optional[TLImage] = None
+        self._preview_refresh_timer = QTimer(self)
+        self._preview_refresh_timer.setSingleShot(True)
+        self._preview_refresh_timer.timeout.connect(self._flush_preview_refresh)
+        self._histogram_refresh_timer = QTimer(self)
+        self._histogram_refresh_timer.setSingleShot(True)
+        self._histogram_refresh_timer.timeout.connect(self._flush_histogram_refresh)
+        self._histogram_result_timer = QTimer(self)
+        self._histogram_result_timer.timeout.connect(self._poll_histogram_results)
+        self._histogram_context = mp.get_context("spawn")
+        self._histogram_request_queue = self._histogram_context.Queue()
+        self._histogram_result_queue = self._histogram_context.Queue()
+        self._histogram_process = self._histogram_context.Process(
+            target=histogram_worker_main,
+            args=(self._histogram_request_queue, self._histogram_result_queue),
+            kwargs={
+                "render_dimension": self._HISTOGRAM_RENDER_MAX_DIMENSION,
+                "histogram_dimension": self._HISTOGRAM_RENDER_MAX_DIMENSION,
+            },
+            daemon=True,
+        )
+        self._histogram_process.start()
+        self._histogram_result_timer.start(40)
+        self._histogram_job_id = 0
+        self._latest_histogram_job_id = 0
+        self._original_preview_cache_key: Optional[tuple[str, int]] = None
+        self._original_preview_pixmap: Optional[QPixmap] = None
         self.setStyleSheet(f"background:{C_BG_APP};")
         self._build_ui()
         self._connect_signals()
         self._setup_shortcuts()
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._shutdown_histogram_process)
 
     # ── build ─────────────────────────────────────────────────────────────────
     def _build_ui(self) -> None:
@@ -2747,40 +3087,165 @@ class MainEditorWindow(QWidget):
         self._opts_bar.ruler_toggled.connect(self._canvas.set_ruler)
         self._right_panel.layer_visibility_changed.connect(self._on_layer_visibility_changed)
         self._right_panel.layer_opacity_changed.connect(self._on_layer_opacity_changed)
+        self._right_panel.layer_opacity_change_finished.connect(self._on_layer_opacity_change_finished)
         self._right_panel.adjust_section_changed.connect(self._on_adjust_section_changed)
+        self._right_panel.adjust_section_change_finished.connect(self._on_adjust_section_change_finished)
 
     def open_image(self, path: str) -> bool:
         try:
             tl_image = TLImage.open(path)
-            pixmap = self._render_tlimage_to_pixmap(tl_image)
+            preview_max_dimension = self._preview_max_dimension()
+            edited_image = tl_image.render_image(preview=True, max_dimension=preview_max_dimension)
+            edited_pixmap = self._pil_to_pixmap(edited_image)
         except Exception:
             return False
 
         self._current_tlimage = tl_image
-        self._canvas.set_pixmap(pixmap)
-        self._right_panel.set_malayers(tl_image.malayers)
+        self._original_preview_cache_key = None
+        self._original_preview_pixmap = None
+        original_pixmap = self._get_original_preview_pixmap(tl_image, preview_max_dimension)
+        self._canvas.set_pixmaps(edited_pixmap, original_pixmap, reset_view=True)
+        self._sync_right_panel_from_tlimage()
+        self._right_panel.set_histogram_data(None)
+        self._request_histogram_refresh(immediate=True)
         self.title_changed.emit(f"TempusLoom - {Path(path).name}")
-        self._status_bar.set_image_info(pixmap.width(), pixmap.height())
+        self._status_bar.set_image_info(*tl_image.image_size())
         return True
 
-    def _render_tlimage_to_pixmap(self, tl_image: TLImage) -> QPixmap:
-        return QPixmap.fromImage(ImageQt(tl_image.render()))
+    def _preview_max_dimension(self) -> int:
+        app = QApplication.instance()
+        ratio = app.primaryScreen().devicePixelRatio() if app and app.primaryScreen() else 1.0
+        viewport_max = max(self._canvas.width(), self._canvas.height(), 1)
+        return max(self._MIN_PREVIEW_MAX_DIMENSION, int(round(viewport_max * ratio * 2.0)))
 
-    def _refresh_canvas_from_tlimage(self) -> None:
+    def _pil_to_pixmap(self, image) -> QPixmap:
+        return QPixmap.fromImage(ImageQt(image))
+
+    def _get_original_preview_pixmap(self, tl_image: TLImage, preview_max_dimension: int) -> QPixmap:
+        cache_key = (tl_image.image_path, preview_max_dimension)
+        if self._original_preview_cache_key != cache_key or self._original_preview_pixmap is None:
+            self._original_preview_pixmap = self._pil_to_pixmap(
+                tl_image.load_image(preview=True, max_dimension=preview_max_dimension)
+            )
+            self._original_preview_cache_key = cache_key
+        return self._original_preview_pixmap
+
+    def _render_original_to_pixmap(self, tl_image: TLImage) -> QPixmap:
+        return self._pil_to_pixmap(
+            tl_image.load_image(preview=True, max_dimension=self._preview_max_dimension())
+        )
+
+    def _render_tlimage_to_pixmap(self, tl_image: TLImage, *, preview: bool = True) -> QPixmap:
+        return self._pil_to_pixmap(
+            tl_image.render_image(preview=preview, max_dimension=self._preview_max_dimension() if preview else None)
+        )
+
+    def _apply_preview_to_canvas(self, *, reset_view: bool = False) -> None:
         if self._current_tlimage is None:
             return
-        pixmap = self._render_tlimage_to_pixmap(self._current_tlimage)
-        self._canvas.set_pixmap(pixmap)
-        self._status_bar.set_image_info(pixmap.width(), pixmap.height())
+        preview_max_dimension = self._preview_max_dimension()
+        edited_image = self._current_tlimage.render_image(preview=True, max_dimension=preview_max_dimension)
+        edited_pixmap = self._pil_to_pixmap(edited_image)
+        original_pixmap = self._get_original_preview_pixmap(self._current_tlimage, preview_max_dimension)
+        self._canvas.set_pixmaps(edited_pixmap, original_pixmap, reset_view=reset_view)
+        self._status_bar.set_image_info(*self._current_tlimage.image_size())
+        self._right_panel.set_histogram_metadata(self._current_tlimage.metadata)
+
+    def _schedule_preview_refresh(self, *, immediate: bool = False) -> None:
+        if immediate:
+            if self._preview_refresh_timer.isActive():
+                self._preview_refresh_timer.stop()
+            self._flush_preview_refresh()
+            return
+        if not self._preview_refresh_timer.isActive():
+            self._preview_refresh_timer.start(self._PREVIEW_REFRESH_INTERVAL_MS)
+
+    def _flush_preview_refresh(self) -> None:
+        self._apply_preview_to_canvas(reset_view=False)
+
+    def _request_histogram_refresh(self, *, immediate: bool = False) -> None:
+        if self._current_tlimage is None:
+            return
+        if immediate:
+            if self._histogram_refresh_timer.isActive():
+                self._histogram_refresh_timer.stop()
+            self._flush_histogram_refresh()
+            return
+        self._histogram_refresh_timer.start(self._HISTOGRAM_REFRESH_INTERVAL_MS)
+
+    def _flush_histogram_refresh(self) -> None:
+        if self._current_tlimage is None:
+            return
+        self._histogram_job_id += 1
+        self._latest_histogram_job_id = self._histogram_job_id
+        self._clear_histogram_request_queue()
+        self._histogram_request_queue.put(
+            {
+                "job_id": self._histogram_job_id,
+                "snapshot": self._current_tlimage.to_dict(),
+            }
+        )
+
+    def _clear_histogram_request_queue(self) -> None:
+        while True:
+            try:
+                self._histogram_request_queue.get_nowait()
+            except Empty:
+                break
+
+    def _poll_histogram_results(self) -> None:
+        while True:
+            try:
+                result = self._histogram_result_queue.get_nowait()
+            except Empty:
+                break
+            if int(result.get("job_id", 0)) != self._latest_histogram_job_id:
+                continue
+            histogram = result.get("histogram")
+            if histogram is not None:
+                self._right_panel.set_histogram_data(histogram)
+            metadata = result.get("metadata")
+            if isinstance(metadata, dict):
+                self._right_panel.set_histogram_metadata(metadata)
+
+    def _shutdown_histogram_process(self) -> None:
+        process = getattr(self, "_histogram_process", None)
+        if process is None:
+            return
+        if getattr(self, "_histogram_refresh_timer", None) is not None:
+            self._histogram_refresh_timer.stop()
+        if getattr(self, "_histogram_result_timer", None) is not None:
+            self._histogram_result_timer.stop()
+        if process.is_alive():
+            self._histogram_request_queue.put({"type": "stop"})
+            process.join(timeout=0.5)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=0.5)
+        self._histogram_process = None
+
+    def _refresh_canvas_from_tlimage(self, *, sync_panel: bool = False) -> None:
+        if self._current_tlimage is None:
+            return
+        self._apply_preview_to_canvas(reset_view=False)
+        self._request_histogram_refresh(immediate=True)
+        if sync_panel:
+            self._sync_right_panel_from_tlimage()
+
+    def _sync_right_panel_from_tlimage(self) -> None:
+        if self._current_tlimage is None:
+            return
         self._right_panel.set_malayers(self._current_tlimage.malayers)
+        self._right_panel.set_edit_state(self._current_tlimage.edit_state)
+        self._right_panel.set_history_entries(self._current_tlimage.history_entries())
+        self._right_panel.set_histogram_metadata(self._current_tlimage.metadata)
 
     def _setup_shortcuts(self) -> None:
         from PyQt6.QtGui import QShortcut
-        QShortcut(QKeySequence("Ctrl+Z"), self, self._undo)
-        QShortcut(QKeySequence("Ctrl+Y"), self, self._redo)
-        QShortcut(QKeySequence("Ctrl+Shift+Z"), self, self._redo)
-        QShortcut(QKeySequence("Ctrl+O"), self, self._open_image)
-        QShortcut(QKeySequence("Ctrl+S"), self, self._save_image)
+        QShortcut(QKeySequence.StandardKey.Undo, self, self._undo)
+        QShortcut(QKeySequence.StandardKey.Redo, self, self._redo)
+        QShortcut(QKeySequence.StandardKey.Open, self, self._open_image)
+        QShortcut(QKeySequence.StandardKey.Save, self, self._save_image)
         QShortcut(QKeySequence("Ctrl+Shift+E"), self, self._export_image)
 
     # action handlers
@@ -2812,31 +3277,70 @@ class MainEditorWindow(QWidget):
             self._current_tlimage.render_to_path(path)
 
     def _undo(self) -> None:
-        pass   # hook into editing history
+        if self._current_tlimage is None:
+            return
+        if self._current_tlimage.undo():
+            self._refresh_canvas_from_tlimage(sync_panel=True)
 
     def _redo(self) -> None:
-        pass   # hook into editing history
+        if self._current_tlimage is None:
+            return
+        if self._current_tlimage.redo():
+            self._refresh_canvas_from_tlimage(sync_panel=True)
 
     def _on_layer_visibility_changed(self, idx: int, visible: bool) -> None:
         if self._current_tlimage is None or idx >= len(self._current_tlimage.malayers):
             return
-        self._current_tlimage.malayers[idx].visible = visible
-        self._refresh_canvas_from_tlimage()
+        layer_name = self._current_tlimage.malayers[idx].name
+        self._current_tlimage.update_layer_state(
+            idx,
+            visible=visible,
+            record_history=True,
+            description=f"图层 · {layer_name} · {'显示' if visible else '隐藏'}",
+        )
+        self._schedule_preview_refresh(immediate=True)
+        self._request_histogram_refresh(immediate=True)
+        self._right_panel.set_history_entries(self._current_tlimage.history_entries())
 
     def _on_layer_opacity_changed(self, idx: int, opacity: float) -> None:
         if self._current_tlimage is None or idx >= len(self._current_tlimage.malayers):
             return
-        self._current_tlimage.malayers[idx].opacity = opacity
-        self._refresh_canvas_from_tlimage()
+        self._current_tlimage.update_layer_state(idx, opacity=opacity)
+        self._schedule_preview_refresh()
+        self._request_histogram_refresh()
+
+    def _on_layer_opacity_change_finished(self, idx: int, opacity: float) -> None:
+        if self._current_tlimage is None or idx >= len(self._current_tlimage.malayers):
+            return
+        layer_name = self._current_tlimage.malayers[idx].name
+        self._current_tlimage.update_layer_state(
+            idx,
+            opacity=opacity,
+            record_history=True,
+            description=f"图层 · {layer_name} · 透明度 {int(round(opacity * 100))}%",
+        )
+        self._schedule_preview_refresh(immediate=True)
+        self._request_histogram_refresh(immediate=True)
+        self._right_panel.set_history_entries(self._current_tlimage.history_entries())
 
     def _on_adjust_section_changed(self, section: str, values: dict) -> None:
         if self._current_tlimage is None:
             return
-        layer = self._current_tlimage.get_primary_malayer_for_tab("adjust")
-        if layer is None or not hasattr(layer, "update_section"):
+        self._current_tlimage.preview_adjustment(section, values)
+        self._schedule_preview_refresh()
+        self._request_histogram_refresh()
+
+    def _on_adjust_section_change_finished(self, section: str, values: dict, description: str) -> None:
+        if self._current_tlimage is None:
             return
-        layer.update_section(section, **values)
-        self._refresh_canvas_from_tlimage()
+        self._current_tlimage.update_adjustment(section, values, record_history=True, description=description)
+        self._schedule_preview_refresh(immediate=True)
+        self._request_histogram_refresh(immediate=True)
+        self._right_panel.set_history_entries(self._current_tlimage.history_entries())
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._shutdown_histogram_process()
+        super().closeEvent(event)
 
     def _on_zoom_changed(self, pct: int) -> None:
         self._opts_bar.set_zoom(pct)

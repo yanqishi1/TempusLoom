@@ -28,6 +28,13 @@ def _float_array_to_pil(array: np.ndarray) -> Image.Image:
     return Image.fromarray((clipped * 255.0).astype(np.uint8), mode="RGBA")
 
 
+def _smoothstep(edge0: float, edge1: float, value: np.ndarray) -> np.ndarray:
+    if edge0 == edge1:
+        return np.zeros_like(value, dtype=np.float32)
+    scaled = np.clip((value - edge0) / (edge1 - edge0), 0.0, 1.0)
+    return scaled * scaled * (3.0 - 2.0 * scaled)
+
+
 class BlendMode(str, Enum):
     NORMAL = "normal"
     DARKEN = "darken"
@@ -93,6 +100,7 @@ class GeometryParams:
 class ToneParams:
     exposure: float = 0
     contrast: float = 0
+    brightness: float = 0
     highlights: float = 0
     shadows: float = 0
     whites: float = 0
@@ -374,6 +382,7 @@ class AdjustmentMalayer(TabMalayer):
         mapping = {
             AdjustmentSection.BASIC.value: self.params.basic,
             AdjustmentSection.WHITE_BALANCE.value: self.params.white_balance,
+            "geometry": self.params.geometry,
             AdjustmentSection.TONE.value: self.params.tone,
             AdjustmentSection.CURVES.value: self.params.curves,
             AdjustmentSection.HSL.value: self.params.hsl,
@@ -420,29 +429,58 @@ class AdjustmentMalayer(TabMalayer):
         result = image
         if tone.exposure:
             result = ImageEnhance.Brightness(result).enhance(float(2 ** _clamp(tone.exposure, -5.0, 5.0)))
+        if tone.brightness:
+            result = ImageEnhance.Brightness(result).enhance(max(0.0, 1.0 + tone.brightness / 200.0))
         if tone.contrast:
             result = ImageEnhance.Contrast(result).enhance(max(0.0, 1.0 + tone.contrast / 100.0))
 
+        alpha = result.getchannel("A")
         rgb = np.asarray(result.convert("RGB"), dtype=np.float32) / 255.0
-        luminance = rgb.mean(axis=2, keepdims=True)
+        luminance = (
+            rgb[..., 0:1] * 0.2126
+            + rgb[..., 1:2] * 0.7152
+            + rgb[..., 2:3] * 0.0722
+        )
+
+        def apply_tonal_region(mask: np.ndarray, amount: float, strength: float) -> None:
+            nonlocal rgb
+            if not amount:
+                return
+            scaled = _clamp(amount / 100.0, -1.0, 1.0) * strength
+            if scaled >= 0:
+                rgb = rgb + (1.0 - rgb) * mask * scaled
+            else:
+                rgb = rgb * (1.0 + mask * scaled)
+
         if tone.highlights:
-            mask = np.clip((luminance - 0.5) * 2.0, 0.0, 1.0)
-            rgb *= 1.0 - mask * (tone.highlights / 100.0) * 0.35
+            apply_tonal_region(_smoothstep(0.45, 1.0, luminance), tone.highlights, 0.45)
         if tone.shadows:
-            mask = np.clip((0.5 - luminance) * 2.0, 0.0, 1.0)
-            rgb += (1.0 - rgb) * mask * (tone.shadows / 100.0) * 0.35
+            apply_tonal_region(1.0 - _smoothstep(0.0, 0.55, luminance), tone.shadows, 0.55)
         if tone.whites:
-            rgb += np.clip((luminance - 0.75) / 0.25, 0.0, 1.0) * (tone.whites / 100.0) * 0.2
+            apply_tonal_region(_smoothstep(0.72, 1.0, luminance), tone.whites, 0.35)
         if tone.blacks:
-            rgb -= np.clip((0.25 - luminance) / 0.25, 0.0, 1.0) * (tone.blacks / 100.0) * 0.2
+            apply_tonal_region(1.0 - _smoothstep(0.0, 0.28, luminance), tone.blacks, 0.40)
 
         result = Image.fromarray((np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8), mode="RGB").convert("RGBA")
-        result.putalpha(image.getchannel("A"))
-        if tone.clarity > 0:
-            detail = result.filter(ImageFilter.DETAIL)
-            result = composite_images(result, detail, BlendMode.OVERLAY, _clamp(tone.clarity / 100.0, 0.0, 1.0) * 0.6, None)
-        if tone.dehaze > 0:
-            result = ImageEnhance.Contrast(result).enhance(1.0 + tone.dehaze / 180.0)
+        result.putalpha(alpha)
+        if tone.clarity:
+            clarity_strength = _clamp(tone.clarity / 100.0, -1.0, 1.0)
+            if clarity_strength > 0:
+                detail = result.filter(ImageFilter.DETAIL)
+                result = composite_images(result, detail, BlendMode.OVERLAY, clarity_strength * 0.6, None)
+            else:
+                softened = result.filter(ImageFilter.GaussianBlur(radius=abs(clarity_strength) * 2.4))
+                result = composite_images(result, softened, BlendMode.NORMAL, abs(clarity_strength) * 0.5, None)
+        if tone.dehaze:
+            dehaze_strength = _clamp(tone.dehaze / 100.0, -1.0, 1.0)
+            if dehaze_strength > 0:
+                result = ImageEnhance.Contrast(result).enhance(1.0 + dehaze_strength * 0.55)
+                result = ImageEnhance.Color(result).enhance(1.0 + dehaze_strength * 0.18)
+            else:
+                fog_strength = abs(dehaze_strength)
+                fog_layer = Image.new("RGBA", result.size, (236, 240, 245, int(round(255 * fog_strength * 0.22))))
+                result = Image.alpha_composite(result, fog_layer)
+                result = ImageEnhance.Contrast(result).enhance(max(0.0, 1.0 - fog_strength * 0.22))
         return result
 
     def _apply_hsl(self, image: Image.Image) -> Image.Image:

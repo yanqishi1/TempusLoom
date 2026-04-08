@@ -508,6 +508,15 @@ def _draw_droplet(p: QPainter, s: int) -> None:
     p.drawPath(path)
 
 
+def _draw_compare(p: QPainter, s: int) -> None:
+    outer = QPainterPath()
+    outer.addRoundedRect(QRectF(s * 0.18, s * 0.14, s * 0.64, s * 0.72), 3, 3)
+    p.drawPath(outer)
+    p.drawLine(QPointF(s * 0.50, s * 0.18), QPointF(s * 0.50, s * 0.82))
+    p.drawLine(QPointF(s * 0.32, s * 0.28), QPointF(s * 0.32, s * 0.72))
+    p.drawLine(QPointF(s * 0.68, s * 0.28), QPointF(s * 0.68, s * 0.72))
+
+
 # ── dispatch table ─────────────────────────────────────────────────────────────
 _DRAW = {
     "mouse-pointer":   _draw_mouse_pointer,
@@ -560,4 +569,5 @@ _DRAW = {
     "sun-medium":           _draw_sun_medium,
     "thermometer":          _draw_thermometer,
     "droplet":              _draw_droplet,
+    "compare":              _draw_compare,
 }
