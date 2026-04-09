@@ -88,6 +88,18 @@ class TLImage:
             "clarity": "clarity",
             "dehaze": "dehaze",
         },
+        "curves": {
+            "rgbCurve": "rgb_curve",
+            "rgb_curve": "rgb_curve",
+            "luminosityCurve": "luminosity_curve",
+            "luminosity_curve": "luminosity_curve",
+            "redCurve": "red_curve",
+            "red_curve": "red_curve",
+            "greenCurve": "green_curve",
+            "green_curve": "green_curve",
+            "blueCurve": "blue_curve",
+            "blue_curve": "blue_curve",
+        },
         "hsl": {
             "hue": "hue",
             "saturation": "saturation",
@@ -751,6 +763,10 @@ class TLImage:
         tone_aliases = cls._SECTION_FIELD_ALIASES["tone"]
         if key in tone_aliases:
             return "tone", {tone_aliases[key]: deepcopy(value)}
+
+        curves_aliases = cls._SECTION_FIELD_ALIASES["curves"]
+        if key in curves_aliases:
+            return "curves", {curves_aliases[key]: deepcopy(value)}
 
         basic_aliases = cls._SECTION_FIELD_ALIASES["basic"]
         if key in basic_aliases:

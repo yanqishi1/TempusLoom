@@ -1263,23 +1263,161 @@ class AdjustSection(QWidget):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class CurveEditor(QWidget):
-    """Simple interactive tone-curve editor (drag-point curve)."""
+    """Interactive Lightroom-style point curve editor."""
 
-    _PAD    = 12
-    _PT_R   = 5     # point radius
-    _GRID   = 4     # grid divisions
+    curve_changed = pyqtSignal(list)
+    curve_change_finished = pyqtSignal(list)
 
-    def __init__(self, curve_color: str = "#ffffff",
-                 height: int = 160, parent=None) -> None:
+    _PAD = 12
+    _PT_R = 5
+    _HIT_R = 11
+    _GRID = 4
+    _MAX_POINTS = 16
+
+    def __init__(self, curve_color: str = "#ffffff", height: int = 160, parent=None) -> None:
         super().__init__(parent)
         self._color = QColor(curve_color)
         self.setFixedHeight(height)
         self.setMinimumWidth(60)
         self.setStyleSheet(f"background:{C_BG_ITEM}; border-radius:6px;")
-        # anchor + editable midpoint
-        self._points: list[list[float]] = [[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]]
-        self._drag_idx: int = -1
+        self._points: list[list[float]] = [[0.0, 0.0], [1.0, 1.0]]
+        self._drag_idx = -1
         self.setCursor(Qt.CursorShape.CrossCursor)
+
+    @classmethod
+    def _default_points(cls) -> list[list[float]]:
+        return [[0.0, 0.0], [1.0, 1.0]]
+
+    @classmethod
+    def _normalize_points(cls, points: Any) -> list[list[float]]:
+        normalized: list[list[float]] = []
+        if isinstance(points, list):
+            for item in points:
+                if isinstance(item, dict):
+                    x_val = item.get("x")
+                    y_val = item.get("y")
+                elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                    x_val, y_val = item[0], item[1]
+                else:
+                    continue
+                try:
+                    x = float(x_val)
+                    y = float(y_val)
+                except (TypeError, ValueError):
+                    continue
+                if x > 1.0 or y > 1.0:
+                    x /= 255.0
+                    y /= 255.0
+                normalized.append([max(0.0, min(1.0, x)), max(0.0, min(1.0, y))])
+
+        normalized.sort(key=lambda item: item[0])
+        deduped: list[list[float]] = []
+        for x, y in normalized:
+            if deduped and abs(deduped[-1][0] - x) < 1e-6:
+                deduped[-1][1] = y
+            else:
+                deduped.append([x, y])
+
+        if not deduped or deduped[0][0] > 1e-6:
+            deduped.insert(0, [0.0, 0.0])
+        else:
+            deduped[0][0] = 0.0
+        if deduped[-1][0] < 1.0 - 1e-6:
+            deduped.append([1.0, 1.0])
+        else:
+            deduped[-1][0] = 1.0
+
+        if len(deduped) < 2:
+            return cls._default_points()
+
+        if len(deduped) > cls._MAX_POINTS:
+            deduped = deduped[: cls._MAX_POINTS - 1] + [deduped[-1]]
+            deduped[0][0] = 0.0
+            deduped[-1][0] = 1.0
+        return deduped
+
+    @staticmethod
+    def _compute_tangents(points: list[list[float]]) -> list[float]:
+        count = len(points)
+        if count < 2:
+            return [0.0] * count
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        secants = []
+        for index in range(count - 1):
+            dx = max(xs[index + 1] - xs[index], 1e-6)
+            secants.append((ys[index + 1] - ys[index]) / dx)
+
+        tangents = [0.0] * count
+        tangents[0] = secants[0]
+        tangents[-1] = secants[-1]
+        for index in range(1, count - 1):
+            prev_secant = secants[index - 1]
+            next_secant = secants[index]
+            if prev_secant == 0.0 or next_secant == 0.0 or prev_secant * next_secant < 0.0:
+                tangents[index] = 0.0
+            else:
+                tangents[index] = (prev_secant + next_secant) / 2.0
+
+        for index, secant in enumerate(secants):
+            if abs(secant) < 1e-6:
+                tangents[index] = 0.0
+                tangents[index + 1] = 0.0
+                continue
+            alpha = tangents[index] / secant
+            beta = tangents[index + 1] / secant
+            magnitude = alpha * alpha + beta * beta
+            if magnitude > 9.0:
+                scale = 3.0 / math.sqrt(magnitude)
+                tangents[index] = scale * alpha * secant
+                tangents[index + 1] = scale * beta * secant
+        return tangents
+
+    @classmethod
+    def _sample_curve(cls, points: list[list[float]], sample_count: int = 160) -> list[tuple[float, float]]:
+        normalized = cls._normalize_points(points)
+        if len(normalized) < 2:
+            return [(0.0, 0.0), (1.0, 1.0)]
+
+        tangents = cls._compute_tangents(normalized)
+        samples: list[tuple[float, float]] = []
+        xs = [point[0] for point in normalized]
+        sample_xs = [index / (sample_count - 1) for index in range(sample_count)]
+        interval = 0
+        for x in sample_xs:
+            while interval < len(xs) - 2 and x > xs[interval + 1]:
+                interval += 1
+            x0, y0 = normalized[interval]
+            x1, y1 = normalized[interval + 1]
+            dx = max(x1 - x0, 1e-6)
+            t = (x - x0) / dx if dx else 0.0
+            t = max(0.0, min(1.0, t))
+            h00 = 2.0 * t**3 - 3.0 * t**2 + 1.0
+            h10 = t**3 - 2.0 * t**2 + t
+            h01 = -2.0 * t**3 + 3.0 * t**2
+            h11 = t**3 - t**2
+            y = h00 * y0 + h10 * dx * tangents[interval] + h01 * y1 + h11 * dx * tangents[interval + 1]
+            samples.append((x, max(0.0, min(1.0, y))))
+        return samples
+
+    def set_points(self, points: Any, *, emit_signal: bool = False) -> None:
+        self._points = self._normalize_points(points)
+        self.update()
+        if emit_signal:
+            self._emit_curve(committed=False)
+
+    def points(self) -> list[dict[str, int]]:
+        return [
+            {"x": int(round(point[0] * 255.0)), "y": int(round(point[1] * 255.0))}
+            for point in self._normalize_points(self._points)
+        ]
+
+    def _emit_curve(self, *, committed: bool) -> None:
+        payload = self.points()
+        if committed:
+            self.curve_change_finished.emit(payload)
+        else:
+            self.curve_changed.emit(payload)
 
     # ── geometry ──────────────────────────────────────────────────────────────
     def _inner(self) -> QRectF:
@@ -1317,25 +1455,12 @@ class CurveEditor(QWidget):
         p.setPen(QPen(QColor(255, 255, 255, 30), 1, Qt.PenStyle.DashLine))
         p.drawLine(self._to_widget(0, 0), self._to_widget(1, 1))
 
-        # curve (Catmull-Rom through points)
-        pts = [self._to_widget(nx, ny) for nx, ny in self._points]
-        if len(pts) >= 2:
+        sampled = [self._to_widget(nx, ny) for nx, ny in self._sample_curve(self._points)]
+        if len(sampled) >= 2:
             path = QPainterPath()
-            path.moveTo(pts[0])
-            if len(pts) == 2:
-                path.lineTo(pts[1])
-            else:
-                # simple cubic through 3 control points
-                path.cubicTo(
-                    QPointF((pts[0].x() + pts[1].x()) / 2, pts[0].y()),
-                    QPointF((pts[0].x() + pts[1].x()) / 2, pts[1].y()),
-                    pts[1],
-                )
-                path.cubicTo(
-                    QPointF((pts[1].x() + pts[2].x()) / 2, pts[1].y()),
-                    QPointF((pts[1].x() + pts[2].x()) / 2, pts[2].y()),
-                    pts[2],
-                )
+            path.moveTo(sampled[0])
+            for point in sampled[1:]:
+                path.lineTo(point)
             curve_color = QColor(self._color)
             curve_color.setAlphaF(0.9)
             p.setPen(QPen(curve_color, 2))
@@ -1344,57 +1469,68 @@ class CurveEditor(QWidget):
 
         # control points
         for i, (nx, ny) in enumerate(self._points):
-            if i == 0 or i == len(self._points) - 1:
-                continue  # don't draw anchors
             wp = self._to_widget(nx, ny)
             p.setBrush(QBrush(QColor(C_BG_PANEL)))
-            p.setPen(QPen(self._color, 1.5))
+            point_color = QColor(self._color)
+            point_color.setAlphaF(0.95 if 0 < i < len(self._points) - 1 else 0.85)
+            p.setPen(QPen(point_color, 1.5))
             p.drawEllipse(wp, float(self._PT_R), float(self._PT_R))
         p.end()
+
+    def _point_at(self, wx: float, wy: float) -> int:
+        for index, (nx, ny) in enumerate(self._points):
+            widget_point = self._to_widget(nx, ny)
+            if abs(widget_point.x() - wx) <= self._HIT_R and abs(widget_point.y() - wy) <= self._HIT_R:
+                return index
+        return -1
 
     # ── interaction ───────────────────────────────────────────────────────────
     def mousePressEvent(self, e: QMouseEvent) -> None:    # noqa: N802
         if e.button() != Qt.MouseButton.LeftButton:
             return
         wx, wy = e.position().x(), e.position().y()
-        for i, (nx, ny) in enumerate(self._points):
-            wp = self._to_widget(nx, ny)
-            if abs(wp.x() - wx) < 10 and abs(wp.y() - wy) < 10:
-                self._drag_idx = i
-                return
-        # add new point
+        hit_index = self._point_at(wx, wy)
+        if hit_index >= 0:
+            self._drag_idx = hit_index
+            return
+        if len(self._points) >= self._MAX_POINTS:
+            return
         nx, ny = self._to_norm(wx, wy)
         insert_at = sum(1 for px, _ in self._points if px < nx)
+        insert_at = max(1, min(len(self._points) - 1, insert_at))
         self._points.insert(insert_at, [nx, ny])
         self._drag_idx = insert_at
         self.update()
+        self._emit_curve(committed=False)
 
     def mouseMoveEvent(self, e: QMouseEvent) -> None:     # noqa: N802
         if self._drag_idx < 0:
             return
         i = self._drag_idx
         nx, ny = self._to_norm(e.position().x(), e.position().y())
-        # clamp between neighbours
-        lo_x = self._points[i - 1][0] + 0.01 if i > 0 else 0.0
-        hi_x = self._points[i + 1][0] - 0.01 if i < len(self._points) - 1 else 1.0
-        self._points[i] = [max(lo_x, min(hi_x, nx)), ny]
+        if i == 0:
+            self._points[i] = [0.0, ny]
+        elif i == len(self._points) - 1:
+            self._points[i] = [1.0, ny]
+        else:
+            lo_x = self._points[i - 1][0] + 0.01
+            hi_x = self._points[i + 1][0] - 0.01
+            self._points[i] = [max(lo_x, min(hi_x, nx)), ny]
         self.update()
+        self._emit_curve(committed=False)
 
     def mouseReleaseEvent(self, _e) -> None:              # noqa: N802
+        if self._drag_idx >= 0:
+            self._emit_curve(committed=True)
         self._drag_idx = -1
 
     def mouseDoubleClickEvent(self, e: QMouseEvent) -> None:   # noqa: N802
-        # remove an editable point on double-click
         wx, wy = e.position().x(), e.position().y()
-        for i in range(len(self._points) - 1, 0, -1):
-            if i == len(self._points) - 1:
-                continue
-            nx, ny = self._points[i]
-            wp = self._to_widget(nx, ny)
-            if abs(wp.x() - wx) < 10 and abs(wp.y() - wy) < 10:
-                self._points.pop(i)
-                self.update()
-                return
+        hit_index = self._point_at(wx, wy)
+        if 0 < hit_index < len(self._points) - 1:
+            self._points.pop(hit_index)
+            self.update()
+            self._emit_curve(committed=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1512,7 +1648,7 @@ class RightPanel(QWidget):
         self.setStyleSheet(
             f"background:{C_BG_RIGHT};"
         )
-        self._active_tab = "蒙板"
+        self._active_tab = "调整"
         self._active_layer = 0
         self._malayers: list = []
         self._layer_rows: list[LayerRow] = []
@@ -1520,6 +1656,8 @@ class RightPanel(QWidget):
         self._history_list_lo: Optional[QVBoxLayout] = None
         self._adjust_slider_meta: dict[GradientSlider, dict[str, Any]] = {}
         self._adjust_value_labels: dict[GradientSlider, QLabel] = {}
+        self._curve_editors: dict[str, CurveEditor] = {}
+        self._curve_editor_meta: dict[CurveEditor, dict[str, str]] = {}
         self._syncing_adjust_controls = False
         self._histogram_canvas: Optional[_HistogramCanvas] = None
         self._histogram_meta_labels: list[QLabel] = []
@@ -1553,7 +1691,7 @@ class RightPanel(QWidget):
                   self._mask_widget):
             self._stack.addWidget(w)
 
-        self._stack.setCurrentIndex(6)
+        self._stack.setCurrentIndex(1)
         lo.addWidget(self._stack, 1)
 
     # ── tab bar ───────────────────────────────────────────────────────────────
@@ -1806,6 +1944,9 @@ class RightPanel(QWidget):
                 slider_value = meta["to_slider"](raw_value)
                 slider.setValue(int(round(slider_value)), emit_signal=False)
                 self._adjust_value_labels[slider].setText(str(int(round(slider.value()))))
+            for editor, meta in self._curve_editor_meta.items():
+                raw_value = self._read_nested_value(adjust_state, meta["state_path"])
+                editor.set_points(raw_value if raw_value is not None else [{"x": 0, "y": 0}, {"x": 255, "y": 255}])
         finally:
             self._syncing_adjust_controls = False
 
@@ -1868,6 +2009,18 @@ class RightPanel(QWidget):
             self.adjust_section_change_finished.emit(meta["section"], payload, meta["display_label"])
         else:
             self.adjust_section_changed.emit(meta["section"], payload)
+
+    def _emit_curve_change(self, editor: CurveEditor, points: list[dict[str, int]], *, committed: bool) -> None:
+        if self._syncing_adjust_controls:
+            return
+        meta = self._curve_editor_meta.get(editor)
+        if meta is None:
+            return
+        payload = {meta["param_path"]: points}
+        if committed:
+            self.adjust_section_change_finished.emit("curves", payload, meta["display_label"])
+        else:
+            self.adjust_section_changed.emit("curves", payload)
 
     def _build_nested_payload(self, path: str, value: Any) -> dict[str, Any]:
         parts = path.split(".")
@@ -2266,7 +2419,6 @@ class RightPanel(QWidget):
         _SECTIONS = [
             ("白平衡",    True,  ""),
             ("影调",      False, ""),
-            ("色阶",      False, ""),
             ("曲线",      False, ""),
             ("HSL",       False, ""),
             ("色彩编辑器", False, ""),
@@ -2280,7 +2432,6 @@ class RightPanel(QWidget):
         _BUILDERS = {
             "白平衡":   self._build_wb_content,
             "影调":     self._build_tone_content,
-            "色阶":     self._build_levels_content,
             "曲线":     self._build_curves_content,
             "HSL":      self._build_hsl_content,
             "颜色分级": self._build_color_grading_content,
@@ -2469,74 +2620,25 @@ class RightPanel(QWidget):
                 display_label=f"影调 · {label}",
             )
 
-    # ── 色阶 section ──────────────────────────────────────────────────────────
-
-    def _build_levels_content(self, lo: QVBoxLayout) -> None:
-        """Levels section: input/output black-white point sliders."""
-        lo.addWidget(_lbl("输入色阶", C_TEXT_3, 11))
-        self._add_gradient_slider_row(
-            lo, "暗部", 0, "#000000", "#ffffff", 0, 255, 0,
-            section="levels",
-            param_path="input_black",
-            display_label="色阶 · 输入暗部",
-        )
-        self._add_gradient_slider_row(
-            lo, "亮部", 255, "#000000", "#ffffff", 0, 255, 255,
-            section="levels",
-            param_path="input_white",
-            display_label="色阶 · 输入亮部",
-        )
-        lo.addSpacing(4)
-        lo.addWidget(_lbl("输出色阶", C_TEXT_3, 11))
-        self._add_gradient_slider_row(
-            lo, "暗部", 0, "#000000", "#ffffff", 0, 255, 0,
-            section="levels",
-            param_path="output_black",
-            display_label="色阶 · 输出暗部",
-        )
-        self._add_gradient_slider_row(
-            lo, "亮部", 255, "#000000", "#ffffff", 0, 255, 255,
-            section="levels",
-            param_path="output_white",
-            display_label="色阶 · 输出亮部",
-        )
-
     # ── 曲线 section ──────────────────────────────────────────────────────────
 
     def _build_curves_content(self, lo: QVBoxLayout) -> None:
-        """Curves section: circle-style channel selector + interactive curve editor."""
+        """Curves section: Lightroom-style point curve for RGB/R/G/B."""
         btn_row = QWidget()
         btn_row.setStyleSheet("background:transparent;")
         btn_lo = QHBoxLayout(btn_row)
         btn_lo.setContentsMargins(0, 0, 0, 4)
         btn_lo.setSpacing(6)
 
-        # S-curve preset icon (left icon button)
-        s_btn = QPushButton()
-        s_btn.setFixedSize(28, 28)
-        s_btn.setToolTip("S 曲线")
-        s_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        s_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        s_btn.setStyleSheet(
-            f"QPushButton{{background:{C_BG_ITEM}; border-radius:6px; border:1px solid {C_BORDER};}}"
-            f"QPushButton:hover{{background:#3a3a3a; border-color:#555;}}"
-        )
-        s_btn.setIcon(_qicon("trending-up", 14, C_TEXT_3))
-        s_btn.setIconSize(QSize(14, 14))
-        btn_lo.addWidget(s_btn)
-
-        # Circle channel buttons: composite, white, red, green, blue
         _CH_CIRCLES = [
-            ("RGB", "#cccccc", True),
-            ("亮度", "#ffffff", False),
-            ("R",   "#ff4444", False),
-            ("G",   "#44cc44", False),
-            ("B",   "#4488ff", False),
+            ("RGB", "#cccccc", "rgb_curve", True),
+            ("R", "#ff2d3d", "red_curve", False),
+            ("G", "#0fd328", "green_curve", False),
+            ("B", "#2c82ea", "blue_curve", False),
         ]
         self._curve_btns: list[QPushButton] = []
-        self._curve_editors: dict[str, CurveEditor] = {}
 
-        for ch_label, ch_color, active in _CH_CIRCLES:
+        for ch_label, ch_color, _curve_key, active in _CH_CIRCLES:
             b = QPushButton()
             b.setFixedSize(22, 22)
             b.setCheckable(True)
@@ -2557,32 +2659,19 @@ class RightPanel(QWidget):
             self._curve_btns.append(b)
 
         btn_lo.addStretch()
-        # auto-adjust icon
-        auto_btn = QPushButton()
-        auto_btn.setFixedSize(24, 24)
-        auto_btn.setToolTip("自动调整")
-        auto_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        auto_btn.setStyleSheet(
-            "QPushButton{background:transparent; border:none;}"
-            "QPushButton:hover{background:#333; border-radius:4px;}"
-        )
-        auto_btn.setIcon(_qicon("crosshair", 13, C_TEXT_4))
-        auto_btn.setIconSize(QSize(13, 13))
-        btn_lo.addWidget(auto_btn)
         lo.addWidget(btn_row)
 
-        # curve editors (stacked, show/hide by channel)
-        _CH_EDITORS = [
-            ("RGB", "#cccccc", True),
-            ("亮度", "#ffffff", False),
-            ("R",   "#ff4444", False),
-            ("G",   "#44cc44", False),
-            ("B",   "#4488ff", False),
-        ]
-        for ch_label, ch_color, active in _CH_EDITORS:
+        for ch_label, ch_color, curve_key, active in _CH_CIRCLES:
             ed = CurveEditor(curve_color=ch_color, height=150)
             ed.setVisible(active)
+            ed.curve_changed.connect(lambda points, editor=ed: self._emit_curve_change(editor, points, committed=False))
+            ed.curve_change_finished.connect(lambda points, editor=ed: self._emit_curve_change(editor, points, committed=True))
             self._curve_editors[ch_label] = ed
+            self._curve_editor_meta[ed] = {
+                "param_path": curve_key,
+                "state_path": f"curves.{curve_key}",
+                "display_label": f"曲线 · {ch_label}",
+            }
             lo.addWidget(ed)
 
         # axis labels

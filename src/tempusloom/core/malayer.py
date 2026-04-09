@@ -450,6 +450,11 @@ class AdjustmentMalayer(TabMalayer):
                 normalized_values["tint"] = self._normalize_white_balance_tint(
                     normalized_values["tint"]
                 )
+        elif section_value == AdjustmentSection.CURVES.value:
+            normalized_values = {
+                key: self._normalize_curve_points(value)
+                for key, value in normalized_values.items()
+            }
 
         target = self.get_section_params(section_value)
         for key, value in normalized_values.items():
@@ -462,9 +467,151 @@ class AdjustmentMalayer(TabMalayer):
         result = _ensure_rgba(image)
         result = self._apply_white_balance(result)
         result = self._apply_tone(result)
+        result = self._apply_curves(result)
         result = self._apply_hsl(result)
         result = self._apply_detail(result)
         result = self._apply_geometry(result)
+        return result
+
+    @staticmethod
+    def _normalize_curve_points(points: Any) -> List[CurvePoint]:
+        normalized: List[CurvePoint] = []
+        if isinstance(points, list):
+            for item in points:
+                if isinstance(item, CurvePoint):
+                    x_val = item.x
+                    y_val = item.y
+                elif isinstance(item, dict):
+                    x_val = item.get("x")
+                    y_val = item.get("y")
+                elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                    x_val, y_val = item[0], item[1]
+                else:
+                    continue
+                try:
+                    x = float(x_val)
+                    y = float(y_val)
+                except (TypeError, ValueError):
+                    continue
+                x = _clamp(x, 0.0, 255.0)
+                y = _clamp(y, 0.0, 255.0)
+                normalized.append(CurvePoint(x=x, y=y))
+
+        normalized.sort(key=lambda point: point.x)
+        deduped: List[CurvePoint] = []
+        for point in normalized:
+            if deduped and abs(deduped[-1].x - point.x) < 1e-6:
+                deduped[-1] = CurvePoint(x=deduped[-1].x, y=point.y)
+            else:
+                deduped.append(point)
+
+        if not deduped or deduped[0].x > 0.0:
+            deduped.insert(0, CurvePoint(x=0.0, y=0.0))
+        else:
+            deduped[0] = CurvePoint(x=0.0, y=deduped[0].y)
+        if deduped[-1].x < 255.0:
+            deduped.append(CurvePoint(x=255.0, y=255.0))
+        else:
+            deduped[-1] = CurvePoint(x=255.0, y=deduped[-1].y)
+
+        if len(deduped) > 16:
+            deduped = deduped[:15] + [deduped[-1]]
+            deduped[0] = CurvePoint(x=0.0, y=deduped[0].y)
+            deduped[-1] = CurvePoint(x=255.0, y=deduped[-1].y)
+        return deduped
+
+    @staticmethod
+    def _curve_tangents(points: List[CurvePoint]) -> List[float]:
+        count = len(points)
+        if count < 2:
+            return [0.0] * count
+        secants: List[float] = []
+        for index in range(count - 1):
+            dx = max(points[index + 1].x - points[index].x, 1e-6)
+            secants.append((points[index + 1].y - points[index].y) / dx)
+
+        tangents = [0.0] * count
+        tangents[0] = secants[0]
+        tangents[-1] = secants[-1]
+        for index in range(1, count - 1):
+            prev_secant = secants[index - 1]
+            next_secant = secants[index]
+            if prev_secant == 0.0 or next_secant == 0.0 or prev_secant * next_secant < 0.0:
+                tangents[index] = 0.0
+            else:
+                tangents[index] = (prev_secant + next_secant) / 2.0
+
+        for index, secant in enumerate(secants):
+            if abs(secant) < 1e-6:
+                tangents[index] = 0.0
+                tangents[index + 1] = 0.0
+                continue
+            alpha = tangents[index] / secant
+            beta = tangents[index + 1] / secant
+            magnitude = alpha * alpha + beta * beta
+            if magnitude > 9.0:
+                scale = 3.0 / np.sqrt(magnitude)
+                tangents[index] = scale * alpha * secant
+                tangents[index + 1] = scale * beta * secant
+        return tangents
+
+    @classmethod
+    def _curve_to_lut(cls, points: List[CurvePoint], size: int = 256) -> np.ndarray:
+        normalized_points = cls._normalize_curve_points(points)
+        if len(normalized_points) < 2:
+            return np.linspace(0.0, 1.0, size, dtype=np.float32)
+
+        tangents = cls._curve_tangents(normalized_points)
+        xs = [point.x for point in normalized_points]
+        lut = np.empty(size, dtype=np.float32)
+        interval = 0
+        for index in range(size):
+            x = float(index)
+            while interval < len(xs) - 2 and x > xs[interval + 1]:
+                interval += 1
+            point0 = normalized_points[interval]
+            point1 = normalized_points[interval + 1]
+            dx = max(point1.x - point0.x, 1e-6)
+            t = _clamp((x - point0.x) / dx, 0.0, 1.0)
+            h00 = 2.0 * t**3 - 3.0 * t**2 + 1.0
+            h10 = t**3 - 2.0 * t**2 + t
+            h01 = -2.0 * t**3 + 3.0 * t**2
+            h11 = t**3 - t**2
+            y = (
+                h00 * point0.y
+                + h10 * dx * tangents[interval]
+                + h01 * point1.y
+                + h11 * dx * tangents[interval + 1]
+            )
+            lut[index] = _clamp(y / 255.0, 0.0, 1.0)
+        return lut
+
+    @staticmethod
+    def _apply_lut(channel: np.ndarray, lut: np.ndarray) -> np.ndarray:
+        indices = np.clip(channel * 255.0, 0.0, 255.0)
+        lo = np.floor(indices).astype(np.int16)
+        hi = np.clip(lo + 1, 0, 255)
+        frac = indices - lo
+        return lut[lo] * (1.0 - frac) + lut[hi] * frac
+
+    def _apply_curves(self, image: Image.Image) -> Image.Image:
+        curves = self.params.curves
+        alpha = image.getchannel("A")
+        rgb = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+
+        rgb_lut = self._curve_to_lut(curves.rgb_curve)
+        red_lut = self._curve_to_lut(curves.red_curve)
+        green_lut = self._curve_to_lut(curves.green_curve)
+        blue_lut = self._curve_to_lut(curves.blue_curve)
+
+        for channel_index in range(3):
+            rgb[..., channel_index] = self._apply_lut(rgb[..., channel_index], rgb_lut)
+        rgb[..., 0] = self._apply_lut(rgb[..., 0], red_lut)
+        rgb[..., 1] = self._apply_lut(rgb[..., 1], green_lut)
+        rgb[..., 2] = self._apply_lut(rgb[..., 2], blue_lut)
+
+        result = Image.fromarray((np.clip(rgb, 0.0, 1.0) * 255).astype(np.uint8), mode="RGB").convert("RGBA")
+        result.putalpha(alpha)
         return result
 
     def _apply_white_balance(self, image: Image.Image) -> Image.Image:
