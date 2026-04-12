@@ -19,7 +19,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QColor, QPainter, QPainterPath, QBrush, QPen,
     QPixmap, QFont, QLinearGradient, QRadialGradient, QWheelEvent,
-    QMouseEvent, QKeySequence, QAction,
+    QMouseEvent, QKeySequence, QAction, QCursor,
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
@@ -1695,15 +1695,38 @@ class CurveEditor(QWidget):
 class ColorWheelWidget(QWidget):
     """Circular hue-saturation wheel with a draggable colour dot."""
 
+    color_changed = pyqtSignal(float, float)
+    color_change_finished = pyqtSignal(float, float)
+
     _R = 52   # outer radius
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, radius: int = 52, parent=None) -> None:
         super().__init__(parent)
+        self._R = max(18, int(radius))
         size = self._R * 2 + 4
         self.setFixedSize(size, size)
         self._hue = 0.0        # 0..360
-        self._sat = 0.0        # 0..1  (distance from centre)
+        self._sat = 0.0        # 0..100  (distance from centre)
         self._dragging = False
+        self._drag_mode = "free"
+        self._drag_anchor_hue = 0.0
+        self._drag_anchor_sat = 0.0
+        self._drag_anchor_angle = 0.0
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def hue(self) -> float:
+        return self._hue
+
+    def saturation(self) -> float:
+        return self._sat
+
+    def set_hs(self, hue: float, saturation: float, *, emit_signal: bool = True) -> None:
+        self._hue = float(hue) % 360.0
+        self._sat = max(0.0, min(100.0, float(saturation)))
+        self.update()
+        if emit_signal:
+            self.color_changed.emit(self._hue, self._sat)
 
     # ── helpers ──────────────────────────────────────────────────────────────
     def _centre(self) -> QPointF:
@@ -1712,8 +1735,45 @@ class ColorWheelWidget(QWidget):
     def _dot_pos(self) -> QPointF:
         cx, cy = self._centre().x(), self._centre().y()
         angle = math.radians(self._hue)
-        r = self._sat * self._R
+        r = (self._sat / 100.0) * self._R
         return QPointF(cx + r * math.cos(angle), cy - r * math.sin(angle))
+
+    def _angle_and_saturation_from_pos(self, pos: QPointF) -> tuple[float, float]:
+        cx, cy = self._centre().x(), self._centre().y()
+        dx, dy = pos.x() - cx, -(pos.y() - cy)
+        dist = math.hypot(dx, dy)
+        hue = math.degrees(math.atan2(dy, dx)) % 360.0
+        saturation = min(100.0, (dist / max(self._R, 1.0)) * 100.0)
+        return hue, saturation
+
+    @staticmethod
+    def _normalize_angle_delta(delta: float) -> float:
+        return (delta + 180.0) % 360.0 - 180.0
+
+    @staticmethod
+    def _drag_mode_from_modifiers(modifiers: Qt.KeyboardModifier) -> str:
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            return "radius"
+        if modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.MetaModifier):
+            return "rotate"
+        return "free"
+
+    def _sync_drag_mode_from_keyboard(self) -> None:
+        if not self._dragging:
+            return
+        pos = QPointF(self.mapFromGlobal(QCursor.pos()))
+        modifiers = QApplication.keyboardModifiers()
+        mode = self._drag_mode_from_modifiers(modifiers)
+        if mode != self._drag_mode:
+            self._reset_drag_anchor(pos, modifiers)
+        self.update()
+
+    def _reset_drag_anchor(self, pos: QPointF, modifiers: Qt.KeyboardModifier) -> None:
+        self._drag_mode = self._drag_mode_from_modifiers(modifiers)
+        angle, _saturation = self._angle_and_saturation_from_pos(pos)
+        self._drag_anchor_angle = angle
+        self._drag_anchor_hue = self._hue
+        self._drag_anchor_sat = self._sat
 
     # ── paint ─────────────────────────────────────────────────────────────────
     def paintEvent(self, _event) -> None:         # noqa: N802
@@ -1753,34 +1813,67 @@ class ColorWheelWidget(QWidget):
         p.drawLine(QPointF(cx.x() - 5, cx.y()), QPointF(cx.x() + 5, cx.y()))
         p.drawLine(QPointF(cx.x(), cx.y() - 5), QPointF(cx.x(), cx.y() + 5))
 
+        if self._dragging and self._drag_mode != "free":
+            dp = self._dot_pos()
+            guide_col = QColor.fromHsvF(self._hue / 360.0, max(self._sat / 100.0, 0.08), 0.95)
+            guide_col.setAlpha(230)
+            p.setPen(QPen(guide_col, 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(cx, dp)
+
         # dot
         dp = self._dot_pos()
-        dot_col = QColor.fromHsvF(self._hue / 360.0, max(self._sat, 0.01), 0.9)
+        dot_col = QColor.fromHsvF(self._hue / 360.0, max(self._sat / 100.0, 0.01), 0.9)
         p.setBrush(QBrush(dot_col))
         p.setPen(QPen(QColor(C_WHITE), 1.5))
         p.drawEllipse(dp, 6.0, 6.0)
         p.end()
 
     # ── interaction ──────────────────────────────────────────────────────────
-    def _update_from_pos(self, pos: QPointF) -> None:
-        cx, cy = self._centre().x(), self._centre().y()
-        dx, dy = pos.x() - cx, -(pos.y() - cy)
-        dist = math.hypot(dx, dy)
-        self._sat = min(1.0, dist / self._R)
-        self._hue = math.degrees(math.atan2(dy, dx)) % 360
-        self.update()
+    def _update_from_pos(
+        self,
+        pos: QPointF,
+        *,
+        modifiers: Qt.KeyboardModifier,
+        emit_signal: bool = True,
+    ) -> None:
+        mode = self._drag_mode_from_modifiers(modifiers)
+        if self._dragging and mode != self._drag_mode:
+            self._reset_drag_anchor(pos, modifiers)
+
+        hue, saturation = self._angle_and_saturation_from_pos(pos)
+        if mode == "rotate" and self._dragging:
+            hue = self._drag_anchor_hue + self._normalize_angle_delta(hue - self._drag_anchor_angle)
+            saturation = self._drag_anchor_sat
+        elif mode == "radius" and self._dragging:
+            hue = self._drag_anchor_hue
+
+        self.set_hs(hue, saturation, emit_signal=emit_signal)
 
     def mousePressEvent(self, e: QMouseEvent) -> None:   # noqa: N802
         if e.button() == Qt.MouseButton.LeftButton:
             self._dragging = True
-            self._update_from_pos(e.position())
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self._reset_drag_anchor(e.position(), e.modifiers())
+            self._update_from_pos(e.position(), modifiers=e.modifiers())
 
     def mouseMoveEvent(self, e: QMouseEvent) -> None:    # noqa: N802
         if self._dragging:
-            self._update_from_pos(e.position())
+            self._update_from_pos(e.position(), modifiers=e.modifiers())
 
     def mouseReleaseEvent(self, _e) -> None:             # noqa: N802
+        if self._dragging:
+            self.color_change_finished.emit(self._hue, self._sat)
         self._dragging = False
+        self._drag_mode = "free"
+        self.update()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        self._sync_drag_mode_from_keyboard()
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event) -> None:  # noqa: N802
+        self._sync_drag_mode_from_keyboard()
+        super().keyReleaseEvent(event)
 
 
 class ThinSlider(QWidget):
@@ -2063,6 +2156,8 @@ class RightPanel(QWidget):
         self._curve_editor_meta: dict[CurveEditor, dict[str, str]] = {}
         self._syncing_adjust_controls = False
         self._color_editor_wheel: Optional[ColorEditorWheelWidget] = None
+        self._color_grading_wheels: dict[str, ColorWheelWidget] = {}
+        self._color_grading_luminance_sliders: dict[str, ThinSlider] = {}
         self._color_editor_preview: Optional[ColorEditorPreviewStrip] = None
         self._color_editor_input_hsl_label: Optional[QLabel] = None
         self._color_editor_output_hsl_label: Optional[QLabel] = None
@@ -2363,6 +2458,19 @@ class RightPanel(QWidget):
                     float(color_editor_state.get("saturation", 0)),
                     emit_signal=False,
                 )
+            color_grading_state = adjust_state.get("color_grading", {}) if isinstance(adjust_state, dict) else {}
+            if isinstance(color_grading_state, dict):
+                for region, wheel in self._color_grading_wheels.items():
+                    wheel.set_hs(
+                        float(color_grading_state.get(f"{region}_hue", 0)),
+                        float(color_grading_state.get(f"{region}_saturation", 0)),
+                        emit_signal=False,
+                    )
+                for region, slider in self._color_grading_luminance_sliders.items():
+                    slider.setValue(
+                        int(round(float(color_grading_state.get(f"{region}_luminance", 0)))),
+                        emit_signal=False,
+                    )
         finally:
             self._syncing_adjust_controls = False
         self._refresh_color_editor_labels()
@@ -2840,7 +2948,6 @@ class RightPanel(QWidget):
             ("HSL",       False, ""),
             ("色彩编辑器", False, ""),
             ("颜色分级",  False, ""),
-            ("可选颜色",  False, ""),
             ("细节",      False, ""),
             ("镜头",      False, ""),
             ("透视矫正",  False, ""),
@@ -2853,7 +2960,6 @@ class RightPanel(QWidget):
             "HSL":      self._build_hsl_content,
             "色彩编辑器": self._build_color_editor_content,
             "颜色分级": self._build_color_grading_content,
-            "可选颜色": self._build_selective_color_content,
             "细节":     self._build_detail_content,
             "镜头":     self._build_lens_content,
             "透视矫正": self._build_perspective_content,
@@ -3576,7 +3682,13 @@ class RightPanel(QWidget):
         lo.addSpacing(4)
 
         # ── helper: wheel + lum slider unit ──────────────────────────────────
-        def _wheel_unit(label: str, wheel_r: int = 52) -> QWidget:
+        region_labels = {
+            "midtones": "中间调",
+            "shadows": "阴影",
+            "highlights": "高光",
+        }
+
+        def _wheel_unit(label: str, region: str, wheel_r: int = 52) -> QWidget:
             """A labelled color wheel with a vertical luminance slider on its left."""
             w = QWidget()
             w.setStyleSheet("background:transparent;")
@@ -3594,21 +3706,42 @@ class RightPanel(QWidget):
             r_lo.setSpacing(4)
 
             # left luminance slider (vertical)
-            lum = QSlider(Qt.Orientation.Vertical)
-            lum.setRange(-100, 100)
-            lum.setValue(0)
-            lum.setFixedWidth(14)
-            lum.setCursor(Qt.CursorShape.PointingHandCursor)
-            lum.setStyleSheet(
-                f"QSlider::groove:vertical{{background:{C_BG_ITEM}; width:4px; border-radius:2px;}}"
-                f"QSlider::handle:vertical{{background:{C_TEXT_4}; width:10px; height:10px;"
-                f"border-radius:5px; margin:-3px 0; left:-3px;}}"
+            lum = ThinSlider(Qt.Orientation.Vertical, -100, 100, 0)
+            lum.setFixedHeight(max(86, wheel_r * 2 + 2))
+            lum.value_changed.connect(
+                lambda value, current_region=region: self._emit_color_grading_luminance_change(
+                    current_region,
+                    value,
+                    committed=False,
+                )
+            )
+            lum.value_committed.connect(
+                lambda value, current_region=region: self._emit_color_grading_luminance_change(
+                    current_region,
+                    value,
+                    committed=True,
+                )
             )
 
-            whl = ColorWheelWidget()
-            whl._R = wheel_r  # type: ignore[attr-defined]
-            sz = wheel_r * 2 + 4
-            whl.setFixedSize(sz, sz)
+            whl = ColorWheelWidget(radius=wheel_r)
+            whl.color_changed.connect(
+                lambda hue, sat, current_region=region: self._emit_color_grading_wheel_change(
+                    current_region,
+                    hue,
+                    sat,
+                    committed=False,
+                )
+            )
+            whl.color_change_finished.connect(
+                lambda hue, sat, current_region=region: self._emit_color_grading_wheel_change(
+                    current_region,
+                    hue,
+                    sat,
+                    committed=True,
+                )
+            )
+            self._color_grading_wheels[region] = whl
+            self._color_grading_luminance_sliders[region] = lum
 
             r_lo.addWidget(lum, alignment=Qt.AlignmentFlag.AlignVCenter)
             r_lo.addWidget(whl, alignment=Qt.AlignmentFlag.AlignVCenter)
@@ -3622,7 +3755,7 @@ class RightPanel(QWidget):
         mid_h = QHBoxLayout(mid_outer)
         mid_h.setContentsMargins(0, 0, 0, 0)
         mid_h.addStretch()
-        mid_h.addWidget(_wheel_unit("中间调", wheel_r=50))
+        mid_h.addWidget(_wheel_unit(region_labels["midtones"], "midtones", wheel_r=50))
         mid_h.addStretch()
         lo.addWidget(mid_outer)
         lo.addSpacing(8)
@@ -3633,52 +3766,47 @@ class RightPanel(QWidget):
         sm_lo = QHBoxLayout(small_row)
         sm_lo.setContentsMargins(0, 0, 0, 0)
         sm_lo.setSpacing(8)
-        sm_lo.addWidget(_wheel_unit("阴影", wheel_r=36))
-        sm_lo.addWidget(_wheel_unit("高光", wheel_r=36))
+        sm_lo.addWidget(_wheel_unit(region_labels["shadows"], "shadows", wheel_r=36))
+        sm_lo.addWidget(_wheel_unit(region_labels["highlights"], "highlights", wheel_r=36))
         lo.addWidget(small_row)
 
-    # ── 可选颜色 section ──────────────────────────────────────────────────────
+    def _emit_color_grading_wheel_change(
+        self,
+        region: str,
+        hue: float,
+        saturation: float,
+        *,
+        committed: bool,
+    ) -> None:
+        if self._syncing_adjust_controls:
+            return
+        region_label = {
+            "midtones": "中间调",
+            "shadows": "阴影",
+            "highlights": "高光",
+        }.get(region, region)
+        payload = {
+            f"{region}_hue": float(hue) % 360.0,
+            f"{region}_saturation": max(0.0, min(100.0, float(saturation))),
+        }
+        if committed:
+            self.adjust_section_change_finished.emit("color_grading", payload, f"颜色分级 · {region_label} · 色轮")
+        else:
+            self.adjust_section_changed.emit("color_grading", payload)
 
-    def _build_selective_color_content(self, lo: QVBoxLayout) -> None:
-        """Selective color: color picker + CMYK sliders."""
-        # color selector dropdown
-        sel_row = QWidget()
-        sel_row.setStyleSheet("background:transparent;")
-        sr_lo = QHBoxLayout(sel_row)
-        sr_lo.setContentsMargins(0, 0, 0, 0)
-        sr_lo.setSpacing(6)
-        sr_lo.addWidget(_lbl("颜色", C_TEXT_3, 12))
-
-        dd = QWidget()
-        dd.setFixedHeight(26)
-        dd.setStyleSheet(
-            f"background:{C_BG_ITEM}; border-radius:5px; border:1px solid {C_BORDER};"
-        )
-        dd_lo = QHBoxLayout(dd)
-        dd_lo.setContentsMargins(8, 0, 6, 0)
-        dd_lo.setSpacing(0)
-        dd_lo.addWidget(_lbl("红色", C_TEXT_1, 12))
-        dd_lo.addStretch()
-        chev = QLabel()
-        chev.setPixmap(icon_pixmap("chevron-down", 10, C_TEXT_4))
-        chev.setFixedSize(10, 10)
-        dd_lo.addWidget(chev)
-        sr_lo.addWidget(dd, 1)
-        lo.addWidget(sel_row)
-        lo.addSpacing(4)
-
-        for label, param_path, lc, rc in [
-            ("青色", "cyan", "#00bbcc", "#ff4444"),
-            ("洋红色", "magenta", "#cc00aa", "#00cc44"),
-            ("黄色", "yellow", "#0044cc", "#ffee00"),
-            ("黑色", "black", "#ffffff", "#000000"),
-        ]:
-            self._add_gradient_slider_row(
-                lo, label, 0, lc, rc, -100, 100, 0,
-                section="selective_color",
-                param_path=param_path,
-                display_label=f"可选颜色 · {label}",
-            )
+    def _emit_color_grading_luminance_change(self, region: str, value: int, *, committed: bool) -> None:
+        if self._syncing_adjust_controls:
+            return
+        region_label = {
+            "midtones": "中间调",
+            "shadows": "阴影",
+            "highlights": "高光",
+        }.get(region, region)
+        payload = {f"{region}_luminance": int(value)}
+        if committed:
+            self.adjust_section_change_finished.emit("color_grading", payload, f"颜色分级 · {region_label} · 明度")
+        else:
+            self.adjust_section_changed.emit("color_grading", payload)
 
     # ── 细节 section ──────────────────────────────────────────────────────────
 

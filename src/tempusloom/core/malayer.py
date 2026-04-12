@@ -226,10 +226,13 @@ class HSLParams:
 class ColorGradingParams:
     shadows_hue: float = 0
     shadows_saturation: float = 0
+    shadows_luminance: float = 0
     midtones_hue: float = 0
     midtones_saturation: float = 0
+    midtones_luminance: float = 0
     highlights_hue: float = 0
     highlights_saturation: float = 0
+    highlights_luminance: float = 0
 
 
 @dataclass
@@ -591,6 +594,7 @@ class AdjustmentMalayer(TabMalayer):
         result = self._apply_curves(result)
         result = self._apply_hsl(result)
         result = self._apply_color_editor(result)
+        result = self._apply_color_grading(result)
         result = self._apply_detail(result)
         result = self._apply_geometry(result)
         return result
@@ -965,6 +969,61 @@ class AdjustmentMalayer(TabMalayer):
         result = Image.fromarray((adjusted_rgb * 255.0).astype(np.uint8), mode="RGB").convert("RGBA")
         result.putalpha(image.getchannel("A"))
         return result
+
+    def _apply_color_grading(self, image: Image.Image) -> Image.Image:
+        color_grading = self.params.color_grading
+        grading_values = (
+            color_grading.shadows_hue,
+            color_grading.shadows_saturation,
+            color_grading.shadows_luminance,
+            color_grading.midtones_hue,
+            color_grading.midtones_saturation,
+            color_grading.midtones_luminance,
+            color_grading.highlights_hue,
+            color_grading.highlights_saturation,
+            color_grading.highlights_luminance,
+        )
+        if not any(abs(float(value)) > 1e-6 for value in grading_values):
+            return image
+
+        rgba = _pil_to_float_array(image)
+        rgb = rgba[..., :3]
+        hue, lightness, saturation = _rgb_to_hls_array(rgb)
+
+        shadows_mask = 1.0 - _smoothstep(0.18, 0.52, lightness)
+        highlights_mask = _smoothstep(0.48, 0.82, lightness)
+        midtones_mask = np.clip((1.0 - shadows_mask) * (1.0 - highlights_mask), 0.0, 1.0)
+
+        tinted_rgb = rgb.copy()
+        lightness_delta = np.zeros_like(lightness, dtype=np.float32)
+
+        region_masks = {
+            "shadows": shadows_mask.astype(np.float32),
+            "midtones": midtones_mask.astype(np.float32),
+            "highlights": highlights_mask.astype(np.float32),
+        }
+
+        for region, mask in region_masks.items():
+            region_saturation = _clamp(float(getattr(color_grading, f"{region}_saturation")) / 100.0, 0.0, 1.0)
+            if region_saturation > 1e-6:
+                tint_hue = np.full_like(lightness, (float(getattr(color_grading, f"{region}_hue")) % 360.0) / 360.0)
+                tint_lightness = np.full_like(lightness, 0.5)
+                tint_saturation = np.full_like(lightness, 1.0)
+                tint_rgb = _hls_to_rgb_array(tint_hue, tint_lightness, tint_saturation)
+                blend_amount = (mask * np.float32(region_saturation * 0.55))[..., None]
+                tinted_rgb = tinted_rgb * (1.0 - blend_amount) + tint_rgb * blend_amount
+
+            region_luminance = _clamp(float(getattr(color_grading, f"{region}_luminance")) / 100.0, -1.0, 1.0)
+            if abs(region_luminance) > 1e-6:
+                lightness_delta += mask * np.float32(region_luminance * 0.18)
+
+        graded_hue, graded_lightness, graded_saturation = _rgb_to_hls_array(tinted_rgb)
+        graded_lightness = np.clip(graded_lightness + lightness_delta, 0.0, 1.0)
+        graded_rgb = _hls_to_rgb_array(graded_hue, graded_lightness, graded_saturation)
+
+        result = rgba.copy()
+        result[..., :3] = graded_rgb
+        return _float_array_to_pil(result)
 
     def _apply_detail(self, image: Image.Image) -> Image.Image:
         detail = self.params.detail
