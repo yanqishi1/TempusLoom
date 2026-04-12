@@ -6,6 +6,9 @@ Main editor window matching the pencil.pen design (1440 × 900).
 
 from __future__ import annotations
 
+import base64
+import io
+import json
 import os
 import math
 import multiprocessing as mp
@@ -26,12 +29,21 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QScrollArea, QFrame, QFileDialog,
     QSizePolicy, QSlider, QComboBox, QMenu, QMenuBar,
     QStackedWidget, QSpacerItem, QDialog, QProgressBar,
+    QPlainTextEdit, QLineEdit, QFormLayout, QDialogButtonBox,
 )
 
 from .editor_icons import icon_pixmap
 from PIL.ImageQt import ImageQt
 from tempusloom.core import TLImage
 from tempusloom.core.histogram_process import histogram_worker_main
+from tempusloom.agent import (
+    AgentModelConfig,
+    AgentRequestContext,
+    PROVIDER_PRESETS,
+    TempusLoomColorAgent,
+    load_agent_config,
+    save_agent_config,
+)
 
 
 # ── design tokens ──────────────────────────────────────────────────────────────
@@ -996,6 +1008,444 @@ class EditorStatusBar(QWidget):
 
     def set_image_info(self, width: int, height: int) -> None:
         self._size_lbl.setText(f"{width} × {height} px")
+
+
+class ChatInputEdit(QPlainTextEdit):
+    submit_requested = pyqtSignal()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if (
+            event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+            and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        ):
+            self.submit_requested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class AIChatBox(QWidget):
+    request_submitted = pyqtSignal(str)
+    settings_requested = pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._busy = False
+        self._latest_json_text = ""
+        self.setFixedHeight(228)
+        self.setStyleSheet(
+            f"background:{C_BG_PANEL}; border-top:1px solid {C_BORDER};"
+        )
+        self._build()
+        self.clear_conversation()
+
+    def _build(self) -> None:
+        lo = QVBoxLayout(self)
+        lo.setContentsMargins(12, 10, 12, 10)
+        lo.setSpacing(8)
+
+        header = QWidget()
+        header_lo = QHBoxLayout(header)
+        header_lo.setContentsMargins(0, 0, 0, 0)
+        header_lo.setSpacing(8)
+
+        title = _lbl("AI 调色助手", C_TEXT_1, 13, QFont.Weight.Medium)
+        self._status_lbl = _lbl("等待你的风格描述", C_TEXT_3, 11)
+        self._context_lbl = _lbl("未附带图片", C_TEXT_4, 11)
+        self._settings_btn = QPushButton("设置")
+        self._settings_btn.setFixedHeight(26)
+        self._settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._settings_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._settings_btn.setStyleSheet(
+            f"QPushButton{{background:transparent; color:{C_TEXT_3}; border:none;"
+            f"border-radius:6px; padding:0 10px; font-size:11px;}}"
+            f"QPushButton:hover{{background:{C_BG_ITEM}; color:{C_TEXT_1};}}"
+        )
+        self._settings_btn.clicked.connect(self.settings_requested.emit)
+
+        self._copy_btn = QPushButton("复制 JSON")
+        self._copy_btn.setFixedHeight(26)
+        self._copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._copy_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._copy_btn.setEnabled(False)
+        self._copy_btn.setStyleSheet(
+            f"QPushButton{{background:{C_BG_ITEM}; color:{C_TEXT_1}; border:none;"
+            f"border-radius:6px; padding:0 10px; font-size:11px;}}"
+            f"QPushButton:hover{{background:#343434;}}"
+            f"QPushButton:disabled{{color:{C_TEXT_4}; background:#262626;}}"
+        )
+        self._copy_btn.clicked.connect(self._copy_latest_json)
+
+        self._clear_btn = QPushButton("清空")
+        self._clear_btn.setFixedHeight(26)
+        self._clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._clear_btn.setStyleSheet(
+            f"QPushButton{{background:transparent; color:{C_TEXT_3}; border:none;"
+            f"border-radius:6px; padding:0 10px; font-size:11px;}}"
+            f"QPushButton:hover{{background:{C_BG_ITEM}; color:{C_TEXT_1};}}"
+        )
+        self._clear_btn.clicked.connect(self.clear_conversation)
+
+        header_lo.addWidget(title)
+        header_lo.addWidget(self._status_lbl)
+        header_lo.addStretch()
+        header_lo.addWidget(self._context_lbl)
+        header_lo.addWidget(self._settings_btn)
+        header_lo.addWidget(self._copy_btn)
+        header_lo.addWidget(self._clear_btn)
+        lo.addWidget(header)
+
+        self._thread_scroll = QScrollArea()
+        self._thread_scroll.setWidgetResizable(True)
+        self._thread_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._thread_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._thread_scroll.setStyleSheet("background:transparent; border:none;")
+
+        self._thread_container = QWidget()
+        self._thread_container.setStyleSheet("background:transparent;")
+        self._thread_lo = QVBoxLayout(self._thread_container)
+        self._thread_lo.setContentsMargins(0, 0, 0, 0)
+        self._thread_lo.setSpacing(8)
+        self._thread_lo.addStretch()
+        self._thread_scroll.setWidget(self._thread_container)
+        lo.addWidget(self._thread_scroll, 1)
+
+        composer = QWidget()
+        composer_lo = QHBoxLayout(composer)
+        composer_lo.setContentsMargins(0, 0, 0, 0)
+        composer_lo.setSpacing(8)
+
+        self._input = ChatInputEdit()
+        self._input.setPlaceholderText("描述你想要的风格，例如：偏暖胶片感、冷调电影风、日系通透…")
+        self._input.setFixedHeight(56)
+        self._input.setTabChangesFocus(True)
+        self._input.setStyleSheet(
+            f"QPlainTextEdit{{background:{C_BG_APP}; color:{C_TEXT_1};"
+            f"border:1px solid {C_BORDER}; border-radius:8px; padding:8px;"
+            f"selection-background-color:{C_PRIMARY}; font-size:12px;}}"
+        )
+        self._input.submit_requested.connect(self._submit)
+        composer_lo.addWidget(self._input, 1)
+        lo.addWidget(composer)
+
+        footer = QWidget()
+        footer_lo = QHBoxLayout(footer)
+        footer_lo.setContentsMargins(0, 0, 0, 0)
+        footer_lo.setSpacing(8)
+
+        self._mode_combo = QComboBox()
+        self._mode_combo.addItem("⚡ Full Auto")
+        self._mode_combo.setCurrentIndex(0)
+        self._mode_combo.setEnabled(False)
+        self._mode_combo.setFixedHeight(32)
+        self._mode_combo.setMinimumWidth(122)
+        self._mode_combo.setStyleSheet(self._pill_combo_qss())
+
+        self._model_btn = QPushButton("未配置模型")
+        self._model_btn.setFixedHeight(32)
+        self._model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._model_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._model_btn.setStyleSheet(self._pill_button_qss(min_width=148))
+        self._model_btn.clicked.connect(self.settings_requested.emit)
+
+        self._effort_combo = QComboBox()
+        self._effort_combo.addItems(["Low", "Medium", "High"])
+        self._effort_combo.setCurrentText("High")
+        self._effort_combo.setFixedHeight(32)
+        self._effort_combo.setMinimumWidth(88)
+        self._effort_combo.setStyleSheet(self._pill_combo_qss())
+
+        self._send_btn = QPushButton()
+        self._send_btn.setFixedSize(44, 32)
+        self._send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._send_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._send_btn.setIcon(_qicon("share", 16, C_WHITE))
+        self._send_btn.setIconSize(QSize(16, 16))
+        self._send_btn.setStyleSheet(
+            f"QPushButton{{background:{C_PRIMARY}; color:{C_WHITE}; border:none;"
+            f"border-radius:10px; font-size:12px; font-weight:600;}}"
+            f"QPushButton:hover{{background:{C_PRIMARY_H};}}"
+            f"QPushButton:pressed{{background:#285bd1;}}"
+            f"QPushButton:disabled{{background:#2a3655; color:#96a5d6;}}"
+        )
+        self._send_btn.clicked.connect(self._submit)
+
+        footer_lo.addWidget(self._mode_combo)
+        footer_lo.addWidget(self._model_btn)
+        footer_lo.addWidget(self._effort_combo)
+        footer_lo.addStretch()
+        footer_lo.addWidget(self._send_btn)
+        lo.addWidget(footer)
+
+    @staticmethod
+    def _pill_combo_qss() -> str:
+        return (
+            f"QComboBox{{background:{C_BG_APP}; color:{C_TEXT_1}; border:1px solid {C_BORDER};"
+            f"border-radius:10px; padding:0 12px; font-size:12px;}}"
+            f"QComboBox:hover{{border-color:#444;}}"
+            f"QComboBox::drop-down{{border:none; width:20px;}}"
+            f"QComboBox QAbstractItemView{{background:{C_BG_PANEL}; color:{C_TEXT_1};"
+            f"selection-background-color:{C_BG_ACTIVE}; border:1px solid {C_BORDER};}}"
+        )
+
+    @staticmethod
+    def _pill_button_qss(*, min_width: int) -> str:
+        return (
+            f"QPushButton{{background:{C_BG_APP}; color:{C_TEXT_1}; border:1px solid {C_BORDER};"
+            f"border-radius:10px; padding:0 12px; min-width:{min_width}px; text-align:left; font-size:12px;}}"
+            f"QPushButton:hover{{border-color:#444; background:#222;}}"
+        )
+
+    def clear_conversation(self) -> None:
+        while self._thread_lo.count() > 1:
+            item = self._thread_lo.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._latest_json_text = ""
+        self._copy_btn.setEnabled(False)
+        self.add_assistant_message(
+            "已准备好。打开图片后，直接告诉我你想要的风格，我会返回一份可供调整面板接收的调色 JSON。"
+        )
+
+    def set_image_context(self, image_name: Optional[str]) -> None:
+        if image_name:
+            self._context_lbl.setText(f"已附带图片 · {image_name}")
+        else:
+            self._context_lbl.setText("未附带图片")
+
+    def set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        self._input.setEnabled(not busy)
+        self._send_btn.setEnabled(not busy)
+        self._model_btn.setEnabled(not busy)
+        self._settings_btn.setEnabled(not busy)
+        self._status_lbl.setText("AI 正在生成调色 JSON…" if busy else "等待你的风格描述")
+
+    def set_model_badge(self, text: str) -> None:
+        self._model_btn.setText(text or "未配置模型")
+
+    def set_latest_response_json(self, payload: dict[str, Any]) -> None:
+        self._latest_json_text = json.dumps(payload, ensure_ascii=False, indent=2)
+        self._copy_btn.setEnabled(True)
+
+    def add_user_message(self, text: str) -> None:
+        self._append_message("你", text, is_user=True)
+
+    def add_assistant_message(self, text: str, json_text: Optional[str] = None) -> None:
+        self._append_message("AI", text, is_user=False, json_text=json_text)
+
+    def _submit(self) -> None:
+        if self._busy:
+            return
+        prompt = self._input.toPlainText().strip()
+        if not prompt:
+            return
+        self._input.clear()
+        self.add_user_message(prompt)
+        self.request_submitted.emit(prompt)
+
+    def _copy_latest_json(self) -> None:
+        if not self._latest_json_text:
+            return
+        clipboard = QApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(self._latest_json_text)
+        self._status_lbl.setText("最近一次 JSON 已复制到剪贴板")
+
+    def _append_message(
+        self,
+        role: str,
+        text: str,
+        *,
+        is_user: bool,
+        json_text: Optional[str] = None,
+    ) -> None:
+        row = QWidget()
+        row_lo = QHBoxLayout(row)
+        row_lo.setContentsMargins(0, 0, 0, 0)
+        row_lo.setSpacing(0)
+
+        bubble = QFrame()
+        bubble.setMaximumWidth(720)
+        bubble.setStyleSheet(
+            f"background:{C_BG_ACTIVE if is_user else C_BG_ITEM};"
+            f"border:1px solid {'#395dad' if is_user else C_BORDER};"
+            f"border-radius:10px;"
+        )
+        bubble_lo = QVBoxLayout(bubble)
+        bubble_lo.setContentsMargins(10, 8, 10, 8)
+        bubble_lo.setSpacing(6)
+
+        bubble_lo.addWidget(_lbl(role, C_PRIMARY if is_user else C_TEXT_2, 11, QFont.Weight.Medium))
+
+        text_lbl = QLabel(text)
+        text_lbl.setWordWrap(True)
+        text_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        text_lbl.setStyleSheet(f"color:{C_TEXT_1}; font-size:12px; background:transparent;")
+        bubble_lo.addWidget(text_lbl)
+
+        if json_text:
+            json_lbl = QLabel(json_text)
+            json_lbl.setWordWrap(True)
+            json_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            json_font = QFont("Menlo", 11)
+            json_font.setStyleHint(QFont.StyleHint.Monospace)
+            json_lbl.setFont(json_font)
+            json_lbl.setStyleSheet(
+                f"background:{C_BG_APP}; color:{C_TEXT_1}; border-radius:8px;"
+                f"padding:8px; border:1px solid {C_BORDER};"
+            )
+            bubble_lo.addWidget(json_lbl)
+
+        if is_user:
+            row_lo.addStretch()
+            row_lo.addWidget(bubble)
+        else:
+            row_lo.addWidget(bubble)
+            row_lo.addStretch()
+
+        self._thread_lo.insertWidget(self._thread_lo.count() - 1, row)
+        QTimer.singleShot(0, self._scroll_to_bottom)
+
+    def _scroll_to_bottom(self) -> None:
+        bar = self._thread_scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+
+class AIAgentSettingsDialog(QDialog):
+    _PROVIDER_MODELS = {
+        "openai-compatible": ["gpt-4o", "gpt-4o-mini", "gpt-4.1-mini"],
+        "anthropic": ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"],
+        "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+        "kimi": ["moonshot-v1-8k", "moonshot-v1-32k"],
+        "glm": ["glm-4-flash", "glm-4-plus"],
+    }
+
+    def __init__(self, config: AgentModelConfig, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("AI Chatbox 设置")
+        self.setModal(True)
+        self.setFixedWidth(520)
+        self.setStyleSheet(
+            f"QDialog{{background:{C_BG_PANEL};}}"
+            f"QLabel{{color:{C_TEXT_1}; font-size:12px;}}"
+            f"QLineEdit{{background:{C_BG_APP}; color:{C_TEXT_1}; border:1px solid {C_BORDER};"
+            f"border-radius:8px; padding:8px; font-size:12px;}}"
+            f"QComboBox{{background:{C_BG_APP}; color:{C_TEXT_1}; border:1px solid {C_BORDER};"
+            f"border-radius:8px; padding:8px; font-size:12px;}}"
+            f"QComboBox::drop-down{{border:none; width:20px;}}"
+            f"QDialogButtonBox QPushButton{{background:{C_BG_ITEM}; color:{C_TEXT_1}; border:none;"
+            f"border-radius:8px; min-width:88px; min-height:32px; padding:0 12px;}}"
+            f"QDialogButtonBox QPushButton:hover{{background:#343434;}}"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        title = _lbl("连接模型服务", C_TEXT_1, 15, QFont.Weight.Medium)
+        desc = _lbl(
+            "支持 OpenAI 兼容接口，也预置了 Claude / DeepSeek / Kimi / GLM 常见入口。"
+            " 你也可以在选择提供商后继续手动修改 Base URL。",
+            C_TEXT_3,
+            11,
+        )
+        desc.setWordWrap(True)
+        layout.addWidget(title)
+        layout.addWidget(desc)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(12)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        self._provider_box = QComboBox()
+        for provider, preset in PROVIDER_PRESETS.items():
+            self._provider_box.addItem(preset["label"], provider)
+
+        self._base_url_edit = QLineEdit()
+        self._base_url_edit.setPlaceholderText("https://api.openai.com/v1")
+
+        self._api_key_edit = QLineEdit()
+        self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._api_key_edit.setPlaceholderText("sk-...")
+
+        self._model_box = QComboBox()
+        self._model_box.setEditable(True)
+
+        form.addRow("服务提供商", self._provider_box)
+        form.addRow("Base URL", self._base_url_edit)
+        form.addRow("API Key", self._api_key_edit)
+        form.addRow("模型", self._model_box)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Save,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._provider_box.currentIndexChanged.connect(self._on_provider_changed)
+        self._load_from_config(config)
+
+    def _load_from_config(self, config: AgentModelConfig) -> None:
+        index = max(self._provider_box.findData(config.provider), 0)
+        self._provider_box.blockSignals(True)
+        self._provider_box.setCurrentIndex(index)
+        self._provider_box.blockSignals(False)
+        self._refresh_model_options(config.provider, config.model)
+        self._base_url_edit.setText(config.base_url)
+        self._api_key_edit.setText(config.api_key)
+        self._model_box.setCurrentText(config.model)
+
+    def _on_provider_changed(self) -> None:
+        provider = str(self._provider_box.currentData())
+        preset = PROVIDER_PRESETS.get(provider, PROVIDER_PRESETS["openai-compatible"])
+        self._base_url_edit.setText(preset["base_url"])
+        self._refresh_model_options(provider, preset["model"])
+
+    def _refresh_model_options(self, provider: str, selected: str) -> None:
+        self._model_box.clear()
+        self._model_box.addItems(self._PROVIDER_MODELS.get(provider, []))
+        self._model_box.setCurrentText(selected)
+
+    def selected_config(self, existing: AgentModelConfig) -> AgentModelConfig:
+        return AgentModelConfig(
+            provider=str(self._provider_box.currentData()),
+            base_url=self._base_url_edit.text().strip(),
+            api_key=self._api_key_edit.text().strip(),
+            model=self._model_box.currentText().strip(),
+            temperature=existing.temperature,
+            max_tokens=existing.max_tokens,
+            timeout_seconds=existing.timeout_seconds,
+        )
+
+
+class AgentRunWorker(QObject):
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, config: AgentModelConfig, request_payload: dict[str, Any]) -> None:
+        super().__init__()
+        self._config = config
+        self._request_payload = request_payload
+
+    def run(self) -> None:
+        try:
+            agent = TempusLoomColorAgent(self._config)
+            context = AgentRequestContext(
+                image=self._request_payload["image"],
+                style_prompt=str(self._request_payload["style_prompt"]),
+                current_adjust=dict(self._request_payload.get("current_adjust", {})),
+                image_name=str(self._request_payload.get("image_name", "")),
+            )
+            self.finished.emit(agent.run_single_turn(context))
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3941,7 +4391,13 @@ class MainEditorWindow(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self._agent_config = load_agent_config()
         self._current_tlimage: Optional[TLImage] = None
+        self._last_ai_request_payload: Optional[dict[str, Any]] = None
+        self._last_ai_response_payload: Optional[dict[str, Any]] = None
+        self._agent_thread: Optional[QThread] = None
+        self._agent_worker: Optional[AgentRunWorker] = None
+        self._pending_ai_prompt = ""
         self._export_thread: Optional[QThread] = None
         self._export_worker: Optional[ExportWorker] = None
         self._export_progress_dialog: Optional[ExportProgressDialog] = None
@@ -3975,6 +4431,7 @@ class MainEditorWindow(QWidget):
         self.setStyleSheet(f"background:{C_BG_APP};")
         self._build_ui()
         self._connect_signals()
+        self._ai_chatbox.set_model_badge(self._agent_config.display_name())
         self._setup_shortcuts()
         app = QApplication.instance()
         if app is not None:
@@ -4007,10 +4464,12 @@ class MainEditorWindow(QWidget):
 
         self._opts_bar   = ToolOptionsBar()
         self._canvas     = CanvasArea()
+        self._ai_chatbox = AIChatBox()
         self._status_bar = EditorStatusBar()
 
         center_lo.addWidget(self._opts_bar)
         center_lo.addWidget(self._canvas, 1)
+        center_lo.addWidget(self._ai_chatbox)
         center_lo.addWidget(self._status_bar)
         content_lo.addWidget(center, 1)
 
@@ -4028,6 +4487,8 @@ class MainEditorWindow(QWidget):
         self._canvas.color_picked.connect(self._on_canvas_color_picked)
         self._status_bar.zoom_in_requested.connect(self._zoom_in)
         self._status_bar.zoom_out_requested.connect(self._zoom_out)
+        self._ai_chatbox.request_submitted.connect(self._on_ai_chat_requested)
+        self._ai_chatbox.settings_requested.connect(self._open_ai_settings_dialog)
 
         self._opts_bar.grid_toggled.connect(self._canvas.set_grid)
         self._opts_bar.ruler_toggled.connect(self._canvas.set_ruler)
@@ -4051,6 +4512,7 @@ class MainEditorWindow(QWidget):
         self._original_preview_pixmap = None
         original_pixmap = self._get_original_preview_pixmap(tl_image, preview_max_dimension)
         self._canvas.set_pixmaps(edited_pixmap, original_pixmap, reset_view=True)
+        self._ai_chatbox.set_image_context(Path(path).name)
         self._sync_right_panel_from_tlimage()
         self._right_panel.set_histogram_data(None)
         self._request_histogram_refresh(immediate=True)
@@ -4402,8 +4864,137 @@ class MainEditorWindow(QWidget):
         self._right_panel.apply_color_editor_sample(color, committed=True)
         self._tool_sidebar.set_active_tool("mouse-pointer")
 
+    def _open_ai_settings_dialog(self) -> None:
+        dialog = AIAgentSettingsDialog(self._agent_config, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._agent_config = dialog.selected_config(self._agent_config)
+        save_agent_config(self._agent_config)
+        self._ai_chatbox.set_model_badge(self._agent_config.display_name())
+        self._ai_chatbox.add_assistant_message(
+            f"已保存模型配置：{self._agent_config.display_name()}"
+        )
+
+    def _on_ai_chat_requested(self, prompt: str) -> None:
+        if not prompt.strip():
+            return
+        if self._current_tlimage is None:
+            self._ai_chatbox.add_assistant_message(
+                "请先打开一张图片，再描述你想要的风格。我会把压缩后的预览图和风格提示一起整理成请求。"
+            )
+            return
+        if not self._agent_config.is_configured():
+            self._ai_chatbox.add_assistant_message(
+                "请先点击“设置”，填写 Base URL、API Key 和模型名称，然后再发起调色请求。"
+            )
+            self._open_ai_settings_dialog()
+            return
+        if self._agent_thread is not None:
+            self._ai_chatbox.add_assistant_message("上一个请求还在处理中，请稍候。")
+            return
+
+        try:
+            request_payload = self._build_ai_request_payload(prompt)
+            self._last_ai_request_payload = request_payload
+        except Exception as exc:
+            self._ai_chatbox.add_assistant_message(f"生成调色 JSON 失败：{exc}")
+            return
+
+        self._pending_ai_prompt = prompt.strip()
+        self._ai_chatbox.set_busy(True)
+        self._agent_thread = QThread(self)
+        self._agent_worker = AgentRunWorker(self._agent_config, request_payload)
+        self._agent_worker.moveToThread(self._agent_thread)
+        self._agent_thread.started.connect(self._agent_worker.run)
+        self._agent_thread.finished.connect(self._agent_worker.deleteLater)
+        self._agent_worker.finished.connect(self._on_ai_agent_finished)
+        self._agent_worker.failed.connect(self._on_ai_agent_failed)
+        self._agent_worker.finished.connect(self._cleanup_ai_agent_thread)
+        self._agent_worker.failed.connect(self._cleanup_ai_agent_thread)
+        self._agent_thread.start()
+
+        image_meta = request_payload["image"]
+        self._ai_chatbox.add_assistant_message(
+            f"请求已发送：{image_meta['width']} × {image_meta['height']} 预览图，约 {image_meta['byte_size'] // 1024} KB。"
+        )
+
+    def _on_ai_agent_finished(self, result: object) -> None:
+        self._ai_chatbox.set_busy(False)
+        if not hasattr(result, "payload"):
+            self._ai_chatbox.add_assistant_message("AI 返回结果格式异常。")
+            return
+        response_payload = result.payload
+        self._last_ai_response_payload = response_payload
+        self._ai_chatbox.set_latest_response_json(response_payload)
+
+        applied = False
+        apply_error = ""
+        if self._current_tlimage is not None:
+            try:
+                self._current_tlimage.apply_adjust_json_payload(
+                    response_payload,
+                    record_history=True,
+                    description=f"AI 调色 · {self._pending_ai_prompt[:24]}",
+                )
+                self._refresh_canvas_from_tlimage(sync_panel=True)
+                applied = True
+            except Exception as exc:
+                apply_error = str(exc)
+
+        summary = f"{self._agent_config.display_name()} 已返回调色 JSON"
+        if applied:
+            summary += "，并已自动应用到当前图片。"
+        elif apply_error:
+            summary += f"，但应用失败：{apply_error}"
+        self._ai_chatbox.add_assistant_message(
+            summary,
+            json.dumps(response_payload, ensure_ascii=False, indent=2),
+        )
+
+    def _on_ai_agent_failed(self, error: str) -> None:
+        self._ai_chatbox.set_busy(False)
+        self._ai_chatbox.add_assistant_message(f"调用模型失败：{error}")
+
+    def _cleanup_ai_agent_thread(self, *_args) -> None:
+        if self._agent_thread is not None:
+            self._agent_thread.quit()
+            self._agent_thread.wait(1000)
+            self._agent_thread.deleteLater()
+        self._agent_thread = None
+        self._agent_worker = None
+
+    def _build_ai_request_payload(self, prompt: str) -> dict[str, Any]:
+        if self._current_tlimage is None:
+            raise RuntimeError("No TLImage loaded")
+        compressed = self._compress_current_preview_for_ai(self._current_tlimage)
+        return {
+            "image": compressed,
+            "style_prompt": prompt,
+            "current_adjust": self._current_tlimage.to_json_dict().get("adjust", {}),
+            "image_name": Path(self._current_tlimage.image_path).name,
+        }
+
+    def _compress_current_preview_for_ai(self, tl_image: TLImage) -> dict[str, Any]:
+        preview_image = tl_image.render_image(preview=True, max_dimension=self._preview_max_dimension())
+        if preview_image.mode != "RGB":
+            preview_image = preview_image.convert("RGB")
+
+        buf = io.BytesIO()
+        preview_image.save(buf, format="JPEG", quality=78, optimize=True)
+        binary = buf.getvalue()
+        return {
+            "mime_type": "image/jpeg",
+            "width": preview_image.width,
+            "height": preview_image.height,
+            "byte_size": len(binary),
+            "base64": base64.b64encode(binary).decode("ascii"),
+        }
+
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._export_thread is not None:
+            event.ignore()
+            return
+        if self._agent_thread is not None:
             event.ignore()
             return
         self._shutdown_histogram_process()
