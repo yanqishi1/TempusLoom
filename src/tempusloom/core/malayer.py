@@ -9,6 +9,11 @@ import uuid
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
+try:
+    import cv2
+except Exception:
+    cv2 = None
+
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
@@ -164,6 +169,8 @@ class BasicAdjustParams:
 class GeometryParams:
     distortion: float = 0
     vignette: float = 0
+    vignette_midpoint: float = 0
+    chromatic_aberration: float = 0
     vertical: float = 0
     horizontal: float = 0
     rotation: float = 0
@@ -590,6 +597,7 @@ class AdjustmentMalayer(TabMalayer):
     def apply(self, image: Image.Image, original_image: Optional[Image.Image] = None) -> Image.Image:
         result = _ensure_rgba(image)
         result = self._apply_white_balance(result)
+        result = self._apply_calibration(result)
         result = self._apply_tone(result)
         result = self._apply_curves(result)
         result = self._apply_hsl(result)
@@ -804,6 +812,76 @@ class AdjustmentMalayer(TabMalayer):
         out = Image.fromarray(np.clip(rgb, 0, 255).astype(np.uint8), mode="RGB").convert("RGBA")
         out.putalpha(image.getchannel("A"))
         return out
+
+    @staticmethod
+    def _build_calibration_matrix(calibration: CalibrationParams) -> Optional[np.ndarray]:
+        calibration_values = (
+            calibration.red_primary_hue,
+            calibration.red_primary_sat,
+            calibration.green_primary_hue,
+            calibration.green_primary_sat,
+            calibration.blue_primary_hue,
+            calibration.blue_primary_sat,
+        )
+        if not any(abs(float(value)) > 1e-6 for value in calibration_values):
+            return None
+
+        white = np.full(3, 1.0 / 3.0, dtype=np.float32)
+        basis_u = np.asarray((1.0, -1.0, 0.0), dtype=np.float32) / np.sqrt(2.0)
+        basis_v = np.asarray((1.0, 1.0, -2.0), dtype=np.float32) / np.sqrt(6.0)
+        base_primaries = (
+            ("red_primary", np.asarray((2.0 / 3.0, -1.0 / 3.0, -1.0 / 3.0), dtype=np.float32)),
+            ("green_primary", np.asarray((-1.0 / 3.0, 2.0 / 3.0, -1.0 / 3.0), dtype=np.float32)),
+            ("blue_primary", np.asarray((-1.0 / 3.0, -1.0 / 3.0, 2.0 / 3.0), dtype=np.float32)),
+        )
+
+        adjusted_chromas: list[np.ndarray] = []
+        for prefix, base_chroma in base_primaries:
+            coord_u = float(np.dot(base_chroma, basis_u))
+            coord_v = float(np.dot(base_chroma, basis_v))
+            angle = float(np.arctan2(coord_v, coord_u))
+            radius = float(np.hypot(coord_u, coord_v))
+
+            hue_shift = np.deg2rad(
+                _clamp(float(getattr(calibration, f"{prefix}_hue")) / 100.0, -1.0, 1.0) * 32.0
+            )
+            saturation_scale = _clamp(
+                1.0 + float(getattr(calibration, f"{prefix}_sat")) / 100.0,
+                0.0,
+                2.0,
+            )
+
+            rotated_u = np.cos(angle + hue_shift) * radius * saturation_scale
+            rotated_v = np.sin(angle + hue_shift) * radius * saturation_scale
+            adjusted_chroma = basis_u * np.float32(rotated_u) + basis_v * np.float32(rotated_v)
+            adjusted_chromas.append(adjusted_chroma.astype(np.float32))
+
+        mean_chroma = np.mean(np.stack(adjusted_chromas, axis=0), axis=0)
+        calibrated_primaries = [white + (chroma - mean_chroma) for chroma in adjusted_chromas]
+        return np.stack(calibrated_primaries, axis=1).astype(np.float32)
+
+    def _apply_calibration(self, image: Image.Image) -> Image.Image:
+        """Approximate camera-primary calibration with a white-preserving 3×3 matrix.
+
+        The panel controls adjust the red/green/blue primaries in a chromatic plane:
+
+        - ``*_hue`` rotates each primary direction around the neutral axis.
+        - ``*_sat`` scales that primary's chroma magnitude.
+
+        We then rebuild a 3×3 RGB mixing matrix from the adjusted primaries and apply
+        it in a roughly linear-light space. Before converting back, we remove the mean
+        chroma offset across the three primaries so a neutral input remains neutral.
+        """
+        matrix = self._build_calibration_matrix(self.params.calibration)
+        if matrix is None:
+            return image
+
+        rgba = _pil_to_float_array(image)
+        rgb = np.clip(rgba[..., :3], 0.0, 1.0)
+        linear_rgb = np.power(rgb, 2.2).astype(np.float32)
+        calibrated = np.matmul(linear_rgb, matrix.T)
+        rgba[..., :3] = np.power(np.clip(calibrated, 0.0, 1.0), 1.0 / 2.2).astype(np.float32)
+        return _float_array_to_pil(rgba)
 
     def _apply_tone(self, image: Image.Image) -> Image.Image:
         tone = self.params.tone
@@ -1029,15 +1107,117 @@ class AdjustmentMalayer(TabMalayer):
         detail = self.params.detail
         result = image
         if detail.luminance_noise > 0:
-            result = result.filter(ImageFilter.GaussianBlur(radius=_clamp(detail.luminance_noise / 30.0, 0.0, 5.0)))
+            noise_strength = _clamp(float(detail.luminance_noise), 0.0, 100.0)
+            alpha = result.getchannel("A")
+            if cv2 is not None:
+                rgb = np.asarray(result.convert("RGB"), dtype=np.uint8)
+                ycrcb = cv2.cvtColor(rgb, cv2.COLOR_RGB2YCrCb)
+                y_channel, cr_channel, cb_channel = cv2.split(ycrcb)
+
+                sigma_color = 12.0 + noise_strength * 0.85
+                sigma_space = 2.5 + noise_strength * 0.08
+                y_filtered = cv2.bilateralFilter(
+                    y_channel,
+                    d=0,
+                    sigmaColor=sigma_color,
+                    sigmaSpace=sigma_space,
+                )
+
+                chroma_blur = max(0.0, noise_strength / 55.0)
+                if chroma_blur > 0:
+                    cr_channel = cv2.GaussianBlur(cr_channel, (0, 0), sigmaX=chroma_blur)
+                    cb_channel = cv2.GaussianBlur(cb_channel, (0, 0), sigmaX=chroma_blur)
+
+                denoised_rgb = cv2.cvtColor(
+                    cv2.merge((y_filtered, cr_channel, cb_channel)),
+                    cv2.COLOR_YCrCb2RGB,
+                )
+                result = Image.fromarray(denoised_rgb, mode="RGB").convert("RGBA")
+                result.putalpha(alpha)
+            else:
+                ycbcr = result.convert("YCbCr")
+                y_channel, cb_channel, cr_channel = ycbcr.split()
+                y_channel = y_channel.filter(
+                    ImageFilter.GaussianBlur(radius=_clamp(noise_strength / 24.0, 0.0, 4.0))
+                )
+                chroma_radius = _clamp(noise_strength / 48.0, 0.0, 2.0)
+                if chroma_radius > 0:
+                    cb_channel = cb_channel.filter(ImageFilter.GaussianBlur(radius=chroma_radius))
+                    cr_channel = cr_channel.filter(ImageFilter.GaussianBlur(radius=chroma_radius))
+                result = Image.merge("YCbCr", (y_channel, cb_channel, cr_channel)).convert("RGBA")
+                result.putalpha(alpha)
         if detail.sharpen_amount > 0:
-            for _ in range(max(1, int(round(detail.sharpen_amount / 25.0)))):
-                result = result.filter(ImageFilter.UnsharpMask(radius=detail.sharpen_radius, percent=int(detail.sharpen_amount), threshold=int(detail.sharpen_threshold)))
+            sharpen_strength = _clamp(float(detail.sharpen_amount), 0.0, 100.0)
+            radius = float(detail.sharpen_radius) if detail.sharpen_radius > 0 else (0.6 + sharpen_strength / 80.0)
+            threshold = int(round(detail.sharpen_threshold)) if detail.sharpen_threshold > 0 else int(round(sharpen_strength / 30.0))
+            percent = int(round(60 + sharpen_strength * 2.4))
+            result = result.filter(
+                ImageFilter.UnsharpMask(
+                    radius=_clamp(radius, 0.4, 2.2),
+                    percent=max(0, percent),
+                    threshold=max(0, threshold),
+                )
+            )
         return result
 
     def _apply_geometry(self, image: Image.Image) -> Image.Image:
         geometry = self.params.geometry
         result = image
+        if cv2 is not None and (geometry.horizontal or geometry.vertical):
+            width, height = result.size
+            max_x_shift = width * 0.35
+            max_y_shift = height * 0.35
+
+            horizontal = _clamp(float(geometry.horizontal) / 100.0, -1.0, 1.0)
+            vertical = _clamp(float(geometry.vertical) / 100.0, -1.0, 1.0)
+
+            top_left = [0.0, 0.0]
+            top_right = [float(width - 1), 0.0]
+            bottom_left = [0.0, float(height - 1)]
+            bottom_right = [float(width - 1), float(height - 1)]
+
+            if abs(vertical) > 1e-6:
+                shift_x = abs(vertical) * max_x_shift
+                if vertical > 0:
+                    top_left[0] += shift_x
+                    top_right[0] -= shift_x
+                else:
+                    bottom_left[0] += shift_x
+                    bottom_right[0] -= shift_x
+
+            if abs(horizontal) > 1e-6:
+                shift_y = abs(horizontal) * max_y_shift
+                if horizontal > 0:
+                    top_left[1] += shift_y
+                    bottom_left[1] -= shift_y
+                else:
+                    top_right[1] += shift_y
+                    bottom_right[1] -= shift_y
+
+            src = np.array(
+                [
+                    [0.0, 0.0],
+                    [float(width - 1), 0.0],
+                    [0.0, float(height - 1)],
+                    [float(width - 1), float(height - 1)],
+                ],
+                dtype=np.float32,
+            )
+            dst = np.array([top_left, top_right, bottom_left, bottom_right], dtype=np.float32)
+            matrix = cv2.getPerspectiveTransform(src, dst)
+            warped = cv2.warpPerspective(
+                np.asarray(_ensure_rgba(result), dtype=np.uint8),
+                matrix,
+                (width, height),
+                flags=cv2.INTER_CUBIC,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=(0, 0, 0, 0),
+            )
+            result = Image.fromarray(warped, mode="RGBA")
+        if cv2 is not None and geometry.distortion:
+            result = self._apply_lens_distortion(result, float(geometry.distortion))
+        if cv2 is not None and geometry.chromatic_aberration:
+            result = self._apply_chromatic_aberration(result, float(geometry.chromatic_aberration))
         if geometry.rotation:
             result = result.rotate(-geometry.rotation, resample=Image.Resampling.BICUBIC, expand=False)
         if geometry.scale and geometry.scale != 100:
@@ -1050,7 +1230,104 @@ class AdjustmentMalayer(TabMalayer):
             offset_y = (height - scaled_h) // 2 + int(geometry.offset_y)
             canvas.alpha_composite(scaled, (offset_x, offset_y))
             result = canvas
+        if geometry.vignette:
+            result = self._apply_vignette(
+                result,
+                amount=float(geometry.vignette),
+                midpoint=float(geometry.vignette_midpoint),
+            )
         return result
+
+    @staticmethod
+    def _normalized_coordinate_grid(width: int, height: int) -> tuple[np.ndarray, np.ndarray]:
+        x_coords = np.linspace(-1.0, 1.0, num=max(1, width), dtype=np.float32)
+        y_coords = np.linspace(-1.0, 1.0, num=max(1, height), dtype=np.float32)
+        return np.meshgrid(x_coords, y_coords)
+
+    @staticmethod
+    def _normalized_to_pixel_map(x_norm: np.ndarray, y_norm: np.ndarray, width: int, height: int) -> tuple[np.ndarray, np.ndarray]:
+        map_x = ((x_norm + 1.0) * 0.5 * max(width - 1, 1)).astype(np.float32)
+        map_y = ((y_norm + 1.0) * 0.5 * max(height - 1, 1)).astype(np.float32)
+        return map_x, map_y
+
+    def _apply_lens_distortion(self, image: Image.Image, amount: float) -> Image.Image:
+        if cv2 is None:
+            return image
+        width, height = image.size
+        rgba = np.asarray(_ensure_rgba(image), dtype=np.uint8)
+        x_norm, y_norm = self._normalized_coordinate_grid(width, height)
+        radius_sq = x_norm * x_norm + y_norm * y_norm
+        strength = _clamp(amount / 100.0, -1.0, 1.0) * 0.35
+        scale = 1.0 + strength * radius_sq
+        map_x, map_y = self._normalized_to_pixel_map(x_norm * scale, y_norm * scale, width, height)
+        warped = cv2.remap(
+            rgba,
+            map_x,
+            map_y,
+            interpolation=cv2.INTER_CUBIC,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0, 0),
+        )
+        return Image.fromarray(warped, mode="RGBA")
+
+    def _apply_chromatic_aberration(self, image: Image.Image, amount: float) -> Image.Image:
+        if cv2 is None:
+            return image
+        width, height = image.size
+        rgba = np.asarray(_ensure_rgba(image), dtype=np.uint8)
+        x_norm, y_norm = self._normalized_coordinate_grid(width, height)
+        radius_sq = x_norm * x_norm + y_norm * y_norm
+        shift = _clamp(amount / 100.0, -1.0, 1.0) * 0.03
+        delta_x = x_norm * radius_sq * shift
+        delta_y = y_norm * radius_sq * shift
+
+        red_x, red_y = self._normalized_to_pixel_map(x_norm + delta_x, y_norm + delta_y, width, height)
+        green_x, green_y = self._normalized_to_pixel_map(x_norm, y_norm, width, height)
+        blue_x, blue_y = self._normalized_to_pixel_map(x_norm - delta_x, y_norm - delta_y, width, height)
+
+        remapped = np.empty_like(rgba)
+        remapped[..., 0] = cv2.remap(
+            rgba[..., 0],
+            red_x,
+            red_y,
+            interpolation=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REFLECT101,
+        )
+        remapped[..., 1] = cv2.remap(
+            rgba[..., 1],
+            green_x,
+            green_y,
+            interpolation=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REFLECT101,
+        )
+        remapped[..., 2] = cv2.remap(
+            rgba[..., 2],
+            blue_x,
+            blue_y,
+            interpolation=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REFLECT101,
+        )
+        remapped[..., 3] = rgba[..., 3]
+        return Image.fromarray(remapped, mode="RGBA")
+
+    def _apply_vignette(self, image: Image.Image, *, amount: float, midpoint: float) -> Image.Image:
+        rgba = _pil_to_float_array(image)
+        width, height = image.size
+        x_norm, y_norm = self._normalized_coordinate_grid(width, height)
+        radius = np.sqrt(x_norm * x_norm + y_norm * y_norm)
+        radius = radius / max(float(np.sqrt(2.0)), 1e-6)
+
+        midpoint_radius = 0.2 + ((_clamp(midpoint, -100.0, 100.0) + 100.0) / 200.0) * 0.6
+        falloff = _smoothstep(midpoint_radius, 1.0, radius).astype(np.float32)
+        strength = _clamp(amount / 100.0, -1.0, 1.0)
+
+        if strength >= 0:
+            gain = 1.0 - falloff[..., None] * strength * 0.9
+        else:
+            gain = 1.0 + falloff[..., None] * abs(strength) * 0.45
+
+        rgba[..., :3] = np.clip(rgba[..., :3] * gain, 0.0, 1.0)
+        return _float_array_to_pil(rgba)
 
     def _serialize_payload(self) -> Dict[str, Any]:
         return asdict(self.params)

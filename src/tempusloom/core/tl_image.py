@@ -172,6 +172,10 @@ class TLImage:
         "geometry": {
             "distortion": "distortion",
             "vignette": "vignette",
+            "vignetteMidpoint": "vignette_midpoint",
+            "vignette_midpoint": "vignette_midpoint",
+            "chromaticAberration": "chromatic_aberration",
+            "chromatic_aberration": "chromatic_aberration",
             "vertical": "vertical",
             "horizontal": "horizontal",
             "rotation": "rotation",
@@ -674,6 +678,8 @@ class TLImage:
                     "geometry",
                     distortion=lens_values.get("distortion", primary_adjustment.params.geometry.distortion),
                     vignette=lens_values.get("vignette", primary_adjustment.params.geometry.vignette),
+                    vignette_midpoint=lens_values.get("vignette_midpoint", primary_adjustment.params.geometry.vignette_midpoint),
+                    chromatic_aberration=lens_values.get("chromatic_aberration", primary_adjustment.params.geometry.chromatic_aberration),
                 )
 
             perspective_values = adjust_state.get("perspective")

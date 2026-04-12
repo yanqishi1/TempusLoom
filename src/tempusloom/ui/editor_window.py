@@ -2499,6 +2499,7 @@ class RightPanel(QWidget):
         *,
         section: str,
         param_path: str,
+        state_path: Optional[str] = None,
         display_label: str,
         to_model: Optional[Callable[[int], Any]] = None,
         to_slider: Optional[Callable[[Any], float]] = None,
@@ -2506,7 +2507,7 @@ class RightPanel(QWidget):
         self._adjust_slider_meta[slider] = {
             "section": section,
             "param_path": param_path,
-            "state_path": f"{section}.{param_path}",
+            "state_path": state_path or f"{section}.{param_path}",
             "display_label": display_label,
             "to_model": to_model or (lambda value: value),
             "to_slider": to_slider or (lambda value: float(value)),
@@ -3068,6 +3069,7 @@ class RightPanel(QWidget):
         *,
         section: Optional[str] = None,
         param_path: Optional[str] = None,
+        state_path: Optional[str] = None,
         display_label: Optional[str] = None,
         to_model: Optional[Callable[[int], Any]] = None,
         to_slider: Optional[Callable[[Any], float]] = None,
@@ -3101,6 +3103,7 @@ class RightPanel(QWidget):
                 val_lbl,
                 section=section,
                 param_path=param_path,
+                state_path=state_path,
                 display_label=display_label or label,
                 to_model=to_model,
                 to_slider=to_slider,
@@ -3811,33 +3814,19 @@ class RightPanel(QWidget):
     # ── 细节 section ──────────────────────────────────────────────────────────
 
     def _build_detail_content(self, lo: QVBoxLayout) -> None:
-        """Detail section: sharpening + noise reduction."""
-        lo.addWidget(_lbl("锐化", C_TEXT_3, 11))
-        for label, param_path, lc, rc in [
-            ("数量", "sharpen_amount", "#1a1a1a", "#ffffff"),
-            ("半径", "sharpen_radius", "#1a1a1a", "#ffffff"),
-            ("细节", "sharpen_threshold", "#1a1a1a", "#ffffff"),
-            ("蒙版", "mask", "#1a1a1a", "#ffffff"),
-        ]:
-            self._add_gradient_slider_row(
-                lo, label, 0, lc, rc, 0, 100, 0,
-                section="detail",
-                param_path=param_path,
-                display_label=f"细节 · {label}",
-            )
-        lo.addSpacing(4)
-        lo.addWidget(_lbl("降噪", C_TEXT_3, 11))
-        for label, param_path, lc, rc in [
-            ("明亮度", "luminance_noise", "#1a1a1a", "#ffffff"),
-            ("明亮度细节", "luminance_detail", "#1a1a1a", "#ffffff"),
-            ("颜色", "color_noise", "#1a1a1a", "#ffffff"),
-        ]:
-            self._add_gradient_slider_row(
-                lo, label, 0, lc, rc, 0, 100, 0,
-                section="detail",
-                param_path=param_path,
-                display_label=f"降噪 · {label}",
-            )
+        """Detail section: sharpening amount + denoise."""
+        self._add_gradient_slider_row(
+            lo, "锐化", 0, "#1a1a1a", "#ffffff", 0, 100, 0,
+            section="detail",
+            param_path="sharpen_amount",
+            display_label="细节 · 锐化",
+        )
+        self._add_gradient_slider_row(
+            lo, "去杂色", 0, "#1a1a1a", "#ffffff", 0, 100, 0,
+            section="detail",
+            param_path="luminance_noise",
+            display_label="细节 · 去杂色",
+        )
 
     # ── 镜头 section ──────────────────────────────────────────────────────────
 
@@ -3853,6 +3842,7 @@ class RightPanel(QWidget):
                 lo, label, 0, lc, rc, -100, 100, 0,
                 section="lens",
                 param_path=param_path,
+                state_path=f"geometry.{param_path}",
                 display_label=f"镜头 · {label}",
             )
 
@@ -3870,6 +3860,7 @@ class RightPanel(QWidget):
                 lo, label, 0, lc, rc, -100, 100, 0,
                 section="perspective",
                 param_path=param_path,
+                state_path=f"geometry.{param_path}",
                 display_label=f"透视矫正 · {label}",
                 to_model=to_model,
                 to_slider=to_slider,
