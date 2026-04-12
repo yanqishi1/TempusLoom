@@ -229,6 +229,18 @@ class TLImage:
         "tab_id": "tab_id",
         "mask": "mask",
     }
+    _ADJUST_APPLY_ORDER = (
+        "basic",
+        "white_balance",
+        "tone",
+        "curves",
+        "hsl",
+        "color_editor",
+        "color_grading",
+        "detail",
+        "geometry",
+        "calibration",
+    )
 
     def __post_init__(self) -> None:
         if self.name is None:
@@ -400,10 +412,33 @@ class TLImage:
         if self.image_path != previous_path:
             self._invalidate_image_caches()
             self.metadata = self.read_display_metadata()
-        self._sync_malayers_from_edit_state()
+        self._apply_edit_state_delta(normalized)
         self._sync_state_from_malayers()
         if record_history:
             self.commit_history(description or "参数调整")
+
+    def apply_adjust_json_payload(
+        self,
+        payload: Dict[str, Any] | str,
+        *,
+        record_history: bool = False,
+        description: Optional[str] = None,
+    ) -> None:
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        if not isinstance(payload, dict):
+            raise TypeError("Adjustment payload must be a dict or JSON string")
+
+        if "adjust" in payload:
+            root_payload = {"adjust": payload.get("adjust", {})}
+        else:
+            root_payload = {"adjust": payload}
+
+        self.apply_json_payload(
+            root_payload,
+            record_history=record_history,
+            description=description or "JSON 调整",
+        )
 
     @staticmethod
     def histogram_from_image(
@@ -667,30 +702,46 @@ class TLImage:
         primary_adjustment = self._ensure_primary_adjustment_layer()
         adjust_state = self.edit_state.get("adjust", {})
         if isinstance(adjust_state, dict):
-            for section in ("basic", "white_balance", "tone", "curves", "hsl", "color_editor", "color_grading", "detail", "geometry", "calibration"):
-                values = adjust_state.get(section)
-                if isinstance(values, dict):
-                    primary_adjustment.update_section(section, **values)
-
-            lens_values = adjust_state.get("lens")
-            if isinstance(lens_values, dict):
-                primary_adjustment.update_section(
-                    "geometry",
-                    distortion=lens_values.get("distortion", primary_adjustment.params.geometry.distortion),
-                    vignette=lens_values.get("vignette", primary_adjustment.params.geometry.vignette),
-                    vignette_midpoint=lens_values.get("vignette_midpoint", primary_adjustment.params.geometry.vignette_midpoint),
-                    chromatic_aberration=lens_values.get("chromatic_aberration", primary_adjustment.params.geometry.chromatic_aberration),
-                )
-
-            perspective_values = adjust_state.get("perspective")
-            if isinstance(perspective_values, dict):
-                primary_adjustment.update_section("geometry", **perspective_values)
+            self._apply_adjust_delta(primary_adjustment, adjust_state)
 
         primary_adjustment.mask = Mask.from_dict(self.edit_state.get("mask"))
 
         layers_state = self.edit_state.get("layers")
         if isinstance(layers_state, list):
             self._apply_layers_state(layers_state)
+
+    def _apply_edit_state_delta(self, normalized: Dict[str, Any]) -> None:
+        primary_adjustment = self._ensure_primary_adjustment_layer()
+
+        adjust_state = normalized.get("adjust")
+        if isinstance(adjust_state, dict):
+            self._apply_adjust_delta(primary_adjustment, adjust_state)
+
+        if "mask" in normalized:
+            primary_adjustment.mask = Mask.from_dict(self.edit_state.get("mask"))
+
+        if "layers" in normalized and isinstance(self.edit_state.get("layers"), list):
+            self._apply_layers_state(self.edit_state.get("layers"))
+
+    def _apply_adjust_delta(self, primary_adjustment: AdjustmentMalayer, adjust_state: Dict[str, Any]) -> None:
+        for section in self._ADJUST_APPLY_ORDER:
+            values = adjust_state.get(section)
+            if isinstance(values, dict):
+                primary_adjustment.update_section(section, **values)
+
+        lens_values = adjust_state.get("lens")
+        if isinstance(lens_values, dict):
+            primary_adjustment.update_section(
+                "geometry",
+                distortion=lens_values.get("distortion", primary_adjustment.params.geometry.distortion),
+                vignette=lens_values.get("vignette", primary_adjustment.params.geometry.vignette),
+                vignette_midpoint=lens_values.get("vignette_midpoint", primary_adjustment.params.geometry.vignette_midpoint),
+                chromatic_aberration=lens_values.get("chromatic_aberration", primary_adjustment.params.geometry.chromatic_aberration),
+            )
+
+        perspective_values = adjust_state.get("perspective")
+        if isinstance(perspective_values, dict):
+            primary_adjustment.update_section("geometry", **perspective_values)
 
     def _ensure_primary_adjustment_layer(self) -> AdjustmentMalayer:
         layer = self.get_primary_malayer_for_tab(EditorTab.ADJUST)
