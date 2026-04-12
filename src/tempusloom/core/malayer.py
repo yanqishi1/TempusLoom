@@ -1,10 +1,9 @@
 ﻿from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from enum import Enum
 from typing import Any, ClassVar, Dict, Iterable, List, Optional, Type
-import colorsys
 import uuid
 
 import numpy as np
@@ -35,6 +34,82 @@ def _smoothstep(edge0: float, edge1: float, value: np.ndarray) -> np.ndarray:
     return scaled * scaled * (3.0 - 2.0 * scaled)
 
 
+def _rgb_to_hls_array(array: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    rgb = np.clip(array[:, :, :3], 0.0, 1.0)
+    red = rgb[:, :, 0]
+    green = rgb[:, :, 1]
+    blue = rgb[:, :, 2]
+
+    maximum = np.max(rgb, axis=2)
+    minimum = np.min(rgb, axis=2)
+    delta = maximum - minimum
+
+    lightness = (maximum + minimum) / 2.0
+    saturation = np.zeros_like(lightness)
+    hue = np.zeros_like(lightness)
+
+    chroma_mask = delta > 1e-6
+    if np.any(chroma_mask):
+        denominator = 1.0 - np.abs(2.0 * lightness - 1.0)
+        saturation[chroma_mask] = delta[chroma_mask] / np.maximum(denominator[chroma_mask], 1e-6)
+
+        red_mask = chroma_mask & (maximum == red)
+        green_mask = chroma_mask & (maximum == green)
+        blue_mask = chroma_mask & (maximum == blue)
+
+        hue[red_mask] = np.mod((green[red_mask] - blue[red_mask]) / np.maximum(delta[red_mask], 1e-6), 6.0)
+        hue[green_mask] = ((blue[green_mask] - red[green_mask]) / np.maximum(delta[green_mask], 1e-6)) + 2.0
+        hue[blue_mask] = ((red[blue_mask] - green[blue_mask]) / np.maximum(delta[blue_mask], 1e-6)) + 4.0
+        hue = np.mod(hue / 6.0, 1.0)
+
+    return hue.astype(np.float32), lightness.astype(np.float32), saturation.astype(np.float32)
+
+
+def _hls_to_rgb_array(hue: np.ndarray, lightness: np.ndarray, saturation: np.ndarray) -> np.ndarray:
+    hue = np.mod(hue, 1.0).astype(np.float32)
+    lightness = np.clip(lightness, 0.0, 1.0).astype(np.float32)
+    saturation = np.clip(saturation, 0.0, 1.0).astype(np.float32)
+
+    chroma = (1.0 - np.abs(2.0 * lightness - 1.0)) * saturation
+    hue_sector = hue * 6.0
+    secondary = chroma * (1.0 - np.abs(np.mod(hue_sector, 2.0) - 1.0))
+
+    red = np.zeros_like(hue, dtype=np.float32)
+    green = np.zeros_like(hue, dtype=np.float32)
+    blue = np.zeros_like(hue, dtype=np.float32)
+
+    masks = [
+        (hue_sector >= 0.0) & (hue_sector < 1.0),
+        (hue_sector >= 1.0) & (hue_sector < 2.0),
+        (hue_sector >= 2.0) & (hue_sector < 3.0),
+        (hue_sector >= 3.0) & (hue_sector < 4.0),
+        (hue_sector >= 4.0) & (hue_sector < 5.0),
+        (hue_sector >= 5.0) & (hue_sector <= 6.0),
+    ]
+
+    red[masks[0]] = chroma[masks[0]]
+    green[masks[0]] = secondary[masks[0]]
+
+    red[masks[1]] = secondary[masks[1]]
+    green[masks[1]] = chroma[masks[1]]
+
+    green[masks[2]] = chroma[masks[2]]
+    blue[masks[2]] = secondary[masks[2]]
+
+    green[masks[3]] = secondary[masks[3]]
+    blue[masks[3]] = chroma[masks[3]]
+
+    red[masks[4]] = secondary[masks[4]]
+    blue[masks[4]] = chroma[masks[4]]
+
+    red[masks[5]] = chroma[masks[5]]
+    blue[masks[5]] = secondary[masks[5]]
+
+    match = lightness - chroma / 2.0
+    rgb = np.stack((red + match, green + match, blue + match), axis=2)
+    return np.clip(rgb, 0.0, 1.0).astype(np.float32)
+
+
 class BlendMode(str, Enum):
     NORMAL = "normal"
     DARKEN = "darken"
@@ -62,6 +137,7 @@ class AdjustmentSection(str, Enum):
     TONE = "tone"
     CURVES = "curves"
     HSL = "hsl"
+    COLOR_EDITOR = "color_editor"
     COLOR_GRADING = "color_grading"
     DETAIL = "detail"
     LENS = "lens"
@@ -157,6 +233,18 @@ class ColorGradingParams:
 
 
 @dataclass
+class ColorEditorParams:
+    hue: float = 0
+    saturation: float = 0
+    lightness: float = 0
+    color_smoothness: float = 50
+    luminance_smoothness: float = 50
+    hue_shift: float = 0
+    saturation_shift: float = 0
+    luminance_shift: float = 0
+
+
+@dataclass
 class DetailParams:
     sharpen_amount: float = 0
     sharpen_radius: float = 1.0
@@ -183,6 +271,7 @@ class AdjustmentParams:
     tone: ToneParams = field(default_factory=ToneParams)
     curves: CurveParams = field(default_factory=CurveParams)
     hsl: HSLParams = field(default_factory=HSLParams)
+    color_editor: ColorEditorParams = field(default_factory=ColorEditorParams)
     color_grading: ColorGradingParams = field(default_factory=ColorGradingParams)
     detail: DetailParams = field(default_factory=DetailParams)
     calibration: CalibrationParams = field(default_factory=CalibrationParams)
@@ -360,6 +449,16 @@ class AdjustmentMalayer(TabMalayer):
     type_name = "adjustment"
     default_tab = EditorTab.ADJUST
     supported_tabs = (EditorTab.ADJUST, EditorTab.LAYERS)
+    _HSL_COLOR_BANDS: ClassVar[tuple[tuple[str, float, float], ...]] = (
+        ("red", 0.0, 20.0),
+        ("orange", 35.0, 15.0),
+        ("yellow", 65.0, 15.0),
+        ("green", 120.0, 40.0),
+        ("aqua", 180.0, 20.0),
+        ("blue", 230.0, 30.0),
+        ("purple", 280.0, 20.0),
+        ("magenta", 320.0, 20.0),
+    )
 
     def __init__(self, name: str = "Adjustment", *, params: Optional[AdjustmentParams] = None, **kwargs: Any) -> None:
         super().__init__(name, **kwargs)
@@ -428,6 +527,7 @@ class AdjustmentMalayer(TabMalayer):
             AdjustmentSection.TONE.value: self.params.tone,
             AdjustmentSection.CURVES.value: self.params.curves,
             AdjustmentSection.HSL.value: self.params.hsl,
+            AdjustmentSection.COLOR_EDITOR.value: self.params.color_editor,
             AdjustmentSection.COLOR_GRADING.value: self.params.color_grading,
             AdjustmentSection.DETAIL.value: self.params.detail,
             AdjustmentSection.LENS.value: self.params.geometry,
@@ -437,6 +537,29 @@ class AdjustmentMalayer(TabMalayer):
         if value not in mapping:
             raise KeyError(f"Unsupported adjustment section: {value}")
         return mapping[value]
+
+    @classmethod
+    def _merge_param_mapping(cls, target: Any, values: Dict[str, Any]) -> None:
+        for key, value in values.items():
+            if not hasattr(target, key):
+                continue
+            current = getattr(target, key)
+            if isinstance(value, dict) and current is not None and is_dataclass(current):
+                cls._merge_param_mapping(current, value)
+            else:
+                setattr(target, key, value)
+
+    @staticmethod
+    def _coerce_hsl_color_params(value: Any) -> HSLColorParams:
+        if isinstance(value, HSLColorParams):
+            return value
+        if isinstance(value, dict):
+            return HSLColorParams(
+                hue=float(value.get("hue", 0)),
+                saturation=float(value.get("saturation", 0)),
+                luminance=float(value.get("luminance", 0)),
+            )
+        return HSLColorParams()
 
     def update_section(self, section: str | AdjustmentSection, **values: Any) -> None:
         section_value = section.value if isinstance(section, AdjustmentSection) else section
@@ -457,9 +580,7 @@ class AdjustmentMalayer(TabMalayer):
             }
 
         target = self.get_section_params(section_value)
-        for key, value in normalized_values.items():
-            if hasattr(target, key):
-                setattr(target, key, value)
+        self._merge_param_mapping(target, normalized_values)
         if section_value == AdjustmentSection.BASIC.value:
             self._sync_basic_to_pipeline()
 
@@ -469,6 +590,7 @@ class AdjustmentMalayer(TabMalayer):
         result = self._apply_tone(result)
         result = self._apply_curves(result)
         result = self._apply_hsl(result)
+        result = self._apply_color_editor(result)
         result = self._apply_detail(result)
         result = self._apply_geometry(result)
         return result
@@ -752,21 +874,97 @@ class AdjustmentMalayer(TabMalayer):
             arr = arr + (arr - mean) * boost
         if hsl.hue:
             arr = self._apply_global_hue(arr, hsl.hue)
+        arr = self._apply_selective_hsl(arr)
 
         result = Image.fromarray((np.clip(arr, 0.0, 1.0) * 255).astype(np.uint8), mode="RGB").convert("RGBA")
         result.putalpha(image.getchannel("A"))
         return result
 
     def _apply_global_hue(self, arr: np.ndarray, hue_shift: float) -> np.ndarray:
-        delta = hue_shift / 360.0
-        out = np.empty_like(arr)
-        height, width, _ = arr.shape
-        for y in range(height):
-            for x in range(width):
-                r, g, b = arr[y, x]
-                h, l, s = colorsys.rgb_to_hls(float(r), float(g), float(b))
-                out[y, x] = colorsys.hls_to_rgb((h + delta) % 1.0, l, s)
-        return out
+        hue, lightness, saturation = _rgb_to_hls_array(arr)
+        return _hls_to_rgb_array(hue + hue_shift / 360.0, lightness, saturation)
+
+    @staticmethod
+    def _build_hsl_band_mask(hue: np.ndarray, center: float, half_width: float) -> np.ndarray:
+        distance = np.abs(np.mod(hue - center + 0.5, 1.0) - 0.5)
+        outer_band = max(half_width, 1e-6)
+        inner_band = outer_band * 0.55
+        return np.clip(1.0 - _smoothstep(inner_band, outer_band, distance), 0.0, 1.0)
+
+    def _apply_selective_hsl(self, arr: np.ndarray) -> np.ndarray:
+        adjustments: list[tuple[HSLColorParams, float, float]] = []
+        for color_name, center_degrees, half_width_degrees in self._HSL_COLOR_BANDS:
+            color_params = self._coerce_hsl_color_params(getattr(self.params.hsl, color_name, None))
+            if any(
+                abs(float(value)) > 1e-6
+                for value in (color_params.hue, color_params.saturation, color_params.luminance)
+            ):
+                adjustments.append((color_params, center_degrees / 360.0, half_width_degrees / 360.0))
+
+        if not adjustments:
+            return arr
+
+        hue, lightness, saturation = _rgb_to_hls_array(arr)
+        hue_delta = np.zeros_like(hue)
+        saturation_scale = np.ones_like(saturation)
+        lightness_delta = np.zeros_like(lightness)
+
+        for color_params, center, half_width in adjustments:
+            influence = self._build_hsl_band_mask(hue, center, half_width)
+            hue_delta += (float(color_params.hue) / 360.0) * influence
+            saturation_scale *= np.clip(1.0 + (float(color_params.saturation) / 100.0) * influence, 0.0, 4.0)
+            lightness_delta += (float(color_params.luminance) / 200.0) * influence
+
+        return _hls_to_rgb_array(hue + hue_delta, lightness + lightness_delta, saturation * saturation_scale)
+
+    def _apply_color_editor(self, image: Image.Image) -> Image.Image:
+        color_editor = self.params.color_editor
+        if not any(
+            abs(float(value)) > 1e-6
+            for value in (
+                color_editor.hue_shift,
+                color_editor.saturation_shift,
+                color_editor.luminance_shift,
+            )
+        ):
+            return image
+
+        rgb = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+        hue, lightness, saturation = _rgb_to_hls_array(rgb)
+
+        target_hue = (float(color_editor.hue) % 360.0) / 360.0
+        target_saturation = _clamp(float(color_editor.saturation) / 100.0, 0.0, 1.0)
+        target_lightness = _clamp((float(color_editor.lightness) + 100.0) / 200.0, 0.0, 1.0)
+
+        color_smoothness = _clamp(float(color_editor.color_smoothness) / 100.0, 0.0, 1.0)
+        luminance_smoothness = _clamp(float(color_editor.luminance_smoothness) / 100.0, 0.0, 1.0)
+
+        hue_distance = np.abs(np.mod(hue - target_hue + 0.5, 1.0) - 0.5)
+        saturation_distance = np.abs(saturation - target_saturation)
+        lightness_distance = np.abs(lightness - target_lightness)
+
+        hue_band = 0.025 + color_smoothness * 0.225
+        saturation_band = 0.08 + color_smoothness * 0.92
+        lightness_band = 0.04 + luminance_smoothness * 0.46
+
+        hue_weight = 1.0 - _smoothstep(0.0, hue_band, hue_distance)
+        saturation_weight = 1.0 - _smoothstep(0.0, saturation_band, saturation_distance)
+        lightness_weight = 1.0 - _smoothstep(0.0, lightness_band, lightness_distance)
+
+        if target_saturation < 0.08:
+            color_weight = saturation_weight
+        else:
+            color_weight = hue_weight * 0.72 + saturation_weight * 0.28
+        influence = np.clip(color_weight * lightness_weight, 0.0, 1.0)
+
+        shifted_hue = hue + (float(color_editor.hue_shift) / 360.0) * influence
+        shifted_saturation = saturation + (float(color_editor.saturation_shift) / 100.0) * influence
+        shifted_lightness = lightness + (float(color_editor.luminance_shift) / 200.0) * influence
+
+        adjusted_rgb = _hls_to_rgb_array(shifted_hue, shifted_lightness, shifted_saturation)
+        result = Image.fromarray((adjusted_rgb * 255.0).astype(np.uint8), mode="RGB").convert("RGBA")
+        result.putalpha(image.getchannel("A"))
+        return result
 
     def _apply_detail(self, image: Image.Image) -> Image.Image:
         detail = self.params.detail
@@ -835,6 +1033,7 @@ class AdjustmentMalayer(TabMalayer):
                 purple=HSLColorParams(**hsl_payload.get("purple", {})),
                 magenta=HSLColorParams(**hsl_payload.get("magenta", {})),
             ),
+            color_editor=ColorEditorParams(**payload.get("color_editor", {})),
             color_grading=ColorGradingParams(**payload.get("color_grading", {})),
             detail=DetailParams(**payload.get("detail", {})),
             calibration=CalibrationParams(**payload.get("calibration", {})),

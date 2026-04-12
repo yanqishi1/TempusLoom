@@ -56,7 +56,10 @@ images/generated-*.png
 images/generated-*.jpg
 
 # Claude session data
-.claude/
+.claude/*
+!.claude/agents/
+!.claude/agents/*.md
+.claude/settings.local.json
 
 # Pencil design files (large binary, optional – remove line to track)
 # pencil.pen

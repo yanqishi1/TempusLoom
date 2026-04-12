@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 import uuid
 
 from PIL import Image
@@ -51,6 +51,8 @@ class TLImage:
         "levels": "levels",
         "curves": "curves",
         "hsl": "hsl",
+        "colorEditor": "color_editor",
+        "color_editor": "color_editor",
         "colorGrading": "color_grading",
         "color_grading": "color_grading",
         "selectiveColor": "selective_color",
@@ -112,6 +114,21 @@ class TLImage:
             "blue": "blue",
             "purple": "purple",
             "magenta": "magenta",
+        },
+        "color_editor": {
+            "hue": "hue",
+            "saturation": "saturation",
+            "lightness": "lightness",
+            "colorSmoothness": "color_smoothness",
+            "color_smoothness": "color_smoothness",
+            "luminanceSmoothness": "luminance_smoothness",
+            "luminance_smoothness": "luminance_smoothness",
+            "hueShift": "hue_shift",
+            "hue_shift": "hue_shift",
+            "saturationShift": "saturation_shift",
+            "saturation_shift": "saturation_shift",
+            "luminanceShift": "luminance_shift",
+            "luminance_shift": "luminance_shift",
         },
         "color_grading": {
             "shadowsHue": "shadows_hue",
@@ -318,20 +335,48 @@ class TLImage:
     def render(self) -> Image.Image:
         return self.render_image(preview=False)
 
-    def render_image(self, *, preview: bool = False, max_dimension: Optional[int] = None) -> Image.Image:
+    def render_image(
+        self,
+        *,
+        preview: bool = False,
+        max_dimension: Optional[int] = None,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> Image.Image:
         self._sync_malayers_from_edit_state()
+        if progress_callback is not None:
+            progress_callback(5, "加载原图…")
         original = self.load_image(preview=preview, max_dimension=max_dimension)
         composed = original.copy()
-        for malayer in self.malayers:
+        total_layers = len(self.malayers)
+        for index, malayer in enumerate(self.malayers):
+            if progress_callback is not None:
+                progress = 10 + int((index / max(total_layers, 1)) * 70)
+                progress_callback(progress, f"应用图层：{malayer.name}")
             composed = malayer.render(composed, original_image=original)
+        if progress_callback is not None:
+            progress_callback(85, "整理图像…")
         return composed
 
-    def render_to_path(self, output_path: str, *, format: Optional[str] = None) -> str:
+    def render_to_path(
+        self,
+        output_path: str,
+        *,
+        format: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> str:
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
-        image = self.render_image(preview=False)
+        if progress_callback is not None:
+            progress_callback(0, "准备导出…")
+        image = self.render_image(preview=False, progress_callback=progress_callback)
+        if progress_callback is not None:
+            progress_callback(90, "转换图像格式…")
         save_image = image.convert("RGB") if output.suffix.lower() in {".jpg", ".jpeg"} else image
+        if progress_callback is not None:
+            progress_callback(95, "写入导出文件…")
         save_image.save(output, format=format)
+        if progress_callback is not None:
+            progress_callback(100, "导出完成")
         return str(output)
 
     def apply_json_payload(
@@ -618,7 +663,7 @@ class TLImage:
         primary_adjustment = self._ensure_primary_adjustment_layer()
         adjust_state = self.edit_state.get("adjust", {})
         if isinstance(adjust_state, dict):
-            for section in ("basic", "white_balance", "tone", "curves", "hsl", "color_grading", "detail", "geometry", "calibration"):
+            for section in ("basic", "white_balance", "tone", "curves", "hsl", "color_editor", "color_grading", "detail", "geometry", "calibration"):
                 values = adjust_state.get(section)
                 if isinstance(values, dict):
                     primary_adjustment.update_section(section, **values)
@@ -835,6 +880,7 @@ class TLImage:
     def _export_adjust_state(cls, adjust_state: Dict[str, Any]) -> Dict[str, Any]:
         section_names = {
             "white_balance": "whiteBalance",
+            "color_editor": "colorEditor",
             "color_grading": "colorGrading",
             "selective_color": "selectiveColor",
         }

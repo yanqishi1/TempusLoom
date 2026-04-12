@@ -25,6 +25,7 @@ Usage:
 
 import sys
 import os
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -116,6 +117,11 @@ def _vline() -> QFrame:
 
 def _qicon(name: str, size: int, color: str) -> QIcon:
     return QIcon(icon_pixmap(name, size, color))
+
+
+def _app_icon() -> QIcon:
+    icon_path = Path(__file__).resolve().parent / "asserts" / "logo.png"
+    return QIcon(str(icon_path))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -615,9 +621,11 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("TempusLoom")
     app.setOrganizationName("TempusLoom")
+    app.setWindowIcon(_app_icon())
     apply_dark_theme(app)
 
     window = TempusLoomWindow()
+    window.setWindowIcon(_app_icon())
 
     start_mode = "editor" if "--editor" in sys.argv else "gallery"
     start_idx  = _PAGE_EDITOR if start_mode == "editor" else _PAGE_GALLERY

@@ -14,18 +14,18 @@ from queue import Empty
 from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import (
-    Qt, QSize, QRectF, QPointF, QTimer, pyqtSignal,
+    Qt, QSize, QRectF, QPointF, QThread, QTimer, QObject, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QColor, QPainter, QPainterPath, QBrush, QPen,
-    QPixmap, QFont, QLinearGradient, QWheelEvent,
+    QPixmap, QFont, QLinearGradient, QRadialGradient, QWheelEvent,
     QMouseEvent, QKeySequence, QAction,
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QHBoxLayout, QVBoxLayout, QScrollArea, QFrame, QFileDialog,
     QSizePolicy, QSlider, QComboBox, QMenu, QMenuBar,
-    QStackedWidget, QSpacerItem,
+    QStackedWidget, QSpacerItem, QDialog, QProgressBar,
 )
 
 from .editor_icons import icon_pixmap
@@ -128,6 +128,83 @@ def _vline() -> QFrame:
     line.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
     line.setStyleSheet(f"background:{C_BORDER}; border:none;")
     return line
+
+
+class ExportProgressDialog(QDialog):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("导出中")
+        self.setModal(True)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.setWindowFlag(Qt.WindowType.CustomizeWindowHint, True)
+        self.setWindowFlag(Qt.WindowType.WindowTitleHint, True)
+        self.setFixedWidth(360)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        self._label = QLabel("准备导出…")
+        self._label.setStyleSheet(f"color:{C_TEXT_1}; font-size:13px;")
+        layout.addWidget(self._label)
+
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setTextVisible(True)
+        self._progress_bar.setStyleSheet(
+            f"""
+            QProgressBar {{
+                background:{C_BG_ITEM};
+                border:1px solid {C_BORDER};
+                border-radius:6px;
+                color:{C_TEXT_1};
+                text-align:center;
+                min-height:18px;
+            }}
+            QProgressBar::chunk {{
+                background:{C_PRIMARY};
+                border-radius:5px;
+            }}
+            """
+        )
+        layout.addWidget(self._progress_bar)
+
+        self.setStyleSheet(f"background:{C_BG_PANEL};")
+
+    def update_progress(self, value: int, message: str) -> None:
+        self._label.setText(message)
+        self._progress_bar.setValue(max(0, min(100, value)))
+
+    def reject(self) -> None:
+        return
+
+
+class ExportWorker(QObject):
+    progress_changed = pyqtSignal(int, str)
+    finished = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, snapshot: dict[str, Any], export_path: str, export_format: str) -> None:
+        super().__init__()
+        self._snapshot = snapshot
+        self._export_path = export_path
+        self._export_format = export_format
+
+    def run(self) -> None:
+        try:
+            tl_image = TLImage.from_dict(self._snapshot)
+            tl_image.render_to_path(
+                self._export_path,
+                format=self._export_format,
+                progress_callback=self._emit_progress,
+            )
+            self.finished.emit(self._export_path)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+    def _emit_progress(self, value: int, message: str) -> None:
+        self.progress_changed.emit(value, message)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -411,6 +488,17 @@ class ToolSidebar(QWidget):
                 btn.setChecked(False)
         self.tool_changed.emit(name)
 
+    def set_active_tool(self, name: str) -> None:
+        for btn in self._buttons:
+            if btn._icon_name != name:
+                continue
+            if btn.isChecked():
+                self._active_name = name
+                self.tool_changed.emit(name)
+            else:
+                btn.setChecked(True)
+            return
+
     @property
     def active_tool(self) -> str:
         return self._active_name
@@ -544,6 +632,7 @@ class CanvasArea(QWidget):
     """
 
     zoom_changed = pyqtSignal(int)   # zoom % (e.g. 75)
+    color_picked = pyqtSignal(QColor)
 
     _MIN_ZOOM = 5
     _MAX_ZOOM = 800
@@ -564,6 +653,7 @@ class CanvasArea(QWidget):
         self._pan_offset_start = QPointF()
         self._show_grid  = False
         self._show_ruler = False
+        self._active_tool = "mouse-pointer"
 
         # placeholder label
         self._placeholder = QLabel(
@@ -595,6 +685,19 @@ class CanvasArea(QWidget):
         self._compare_btn.hide()
         self.setAcceptDrops(True)
 
+    def set_tool(self, tool_name: str) -> None:
+        self._active_tool = tool_name
+        self._refresh_cursor()
+
+    def _refresh_cursor(self) -> None:
+        if self._panning:
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
+        if self._active_tool == "pipette" and self._display_pixmap() is not None:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            return
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+
     def _display_pixmap(self) -> Optional[QPixmap]:
         if self._compare_mode and self._original_pixmap and not self._original_pixmap.isNull():
             return self._original_pixmap
@@ -617,6 +720,51 @@ class CanvasArea(QWidget):
         margin = 16
         self._compare_btn.move(self.width() - self._compare_btn.width() - margin,
                                self.height() - self._compare_btn.height() - margin)
+
+    def _image_rect(self) -> Optional[QRectF]:
+        px = self._display_pixmap()
+        if px is None or px.isNull():
+            return None
+        width = px.width() * self._zoom / 100
+        height = px.height() * self._zoom / 100
+        return QRectF(self._offset.x(), self._offset.y(), width, height)
+
+    def _canvas_pos_to_image_pos(self, pos: QPointF) -> Optional[tuple[int, int]]:
+        px = self._display_pixmap()
+        rect = self._image_rect()
+        if px is None or rect is None or not rect.contains(pos):
+            return None
+        rel_x = (pos.x() - rect.left()) / max(rect.width(), 1.0)
+        rel_y = (pos.y() - rect.top()) / max(rect.height(), 1.0)
+        rel_x = max(0.0, min(0.999999, rel_x))
+        rel_y = max(0.0, min(0.999999, rel_y))
+        image_x = int(rel_x * px.width())
+        image_y = int(rel_y * px.height())
+        return image_x, image_y
+
+    def _sample_color(self, pos: QPointF, radius: int = 2) -> Optional[QColor]:
+        px = self._display_pixmap()
+        image_pos = self._canvas_pos_to_image_pos(pos)
+        if px is None or image_pos is None:
+            return None
+        image = px.toImage()
+        x, y = image_pos
+        red = 0.0
+        green = 0.0
+        blue = 0.0
+        alpha = 0.0
+        count = 0
+        for yy in range(max(0, y - radius), min(image.height(), y + radius + 1)):
+            for xx in range(max(0, x - radius), min(image.width(), x + radius + 1)):
+                color = image.pixelColor(xx, yy)
+                red += color.redF()
+                green += color.greenF()
+                blue += color.blueF()
+                alpha += color.alphaF()
+                count += 1
+        if count <= 0:
+            return None
+        return QColor.fromRgbF(red / count, green / count, blue / count, alpha / count)
 
     # ── image loading ──────────────────────────────────────────────────────────
     def load_image(self, path: str) -> bool:
@@ -646,6 +794,7 @@ class CanvasArea(QWidget):
         else:
             self._compare_btn.hide()
         self._position_compare_button()
+        self._refresh_cursor()
 
     def set_pixmap(self, px: QPixmap, *, reset_view: bool = False) -> None:
         self.set_pixmaps(px, reset_view=reset_view)
@@ -749,12 +898,18 @@ class CanvasArea(QWidget):
             super().wheelEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:   # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self._active_tool == "pipette":
+            color = self._sample_color(event.position())
+            if color is not None:
+                self.color_picked.emit(color)
+                event.accept()
+                return
         if (event.button() == Qt.MouseButton.MiddleButton or
                 QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier):
             self._panning = True
             self._pan_start = event.position()
             self._pan_offset_start = QPointF(self._offset)
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self._refresh_cursor()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:    # noqa: N802
         if self._panning:
@@ -765,7 +920,7 @@ class CanvasArea(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None: # noqa: N802
         if self._panning:
             self._panning = False
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._refresh_cursor()
 
     def mouseDoubleClickEvent(self, _event) -> None:         # noqa: N802
         self._fit_to_window()
@@ -1628,6 +1783,253 @@ class ColorWheelWidget(QWidget):
         self._dragging = False
 
 
+class ThinSlider(QWidget):
+    value_changed = pyqtSignal(int)
+    value_committed = pyqtSignal(int)
+
+    _H_PAD = 8
+    _V_PAD = 8
+    _HANDLE_R = 7
+
+    def __init__(
+        self,
+        orientation: Qt.Orientation = Qt.Orientation.Horizontal,
+        min_val: int = -100,
+        max_val: int = 100,
+        value: int = 0,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._orientation = orientation
+        self._min = min_val
+        self._max = max_val
+        self._value = max(self._min, min(self._max, value))
+        self._dragging = False
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        if self._orientation == Qt.Orientation.Horizontal:
+            self.setFixedHeight(24)
+            self.setMinimumWidth(60)
+        else:
+            self.setFixedWidth(22)
+            self.setMinimumHeight(188)
+
+    def value(self) -> int:
+        return self._value
+
+    def setValue(self, value: int, *, emit_signal: bool = True) -> None:
+        clamped = max(self._min, min(self._max, int(round(value))))
+        if clamped != self._value:
+            self._value = clamped
+            self.update()
+            if emit_signal:
+                self.value_changed.emit(clamped)
+        elif emit_signal:
+            self.value_changed.emit(clamped)
+
+    def _ratio(self) -> float:
+        span = max(self._max - self._min, 1)
+        return (self._value - self._min) / span
+
+    def _handle_center(self) -> QPointF:
+        ratio = self._ratio()
+        if self._orientation == Qt.Orientation.Horizontal:
+            x0 = float(self._H_PAD)
+            x1 = float(self.width() - self._H_PAD)
+            return QPointF(x0 + ratio * max(x1 - x0, 1.0), self.height() / 2)
+        y0 = float(self._V_PAD)
+        y1 = float(self.height() - self._V_PAD)
+        return QPointF(self.width() / 2, y1 - ratio * max(y1 - y0, 1.0))
+
+    def _pos_to_value(self, pos: QPointF) -> int:
+        span = max(self._max - self._min, 1)
+        if self._orientation == Qt.Orientation.Horizontal:
+            x0 = float(self._H_PAD)
+            x1 = float(self.width() - self._H_PAD)
+            ratio = 0.0 if x1 <= x0 else (pos.x() - x0) / (x1 - x0)
+        else:
+            y0 = float(self._V_PAD)
+            y1 = float(self.height() - self._V_PAD)
+            ratio = 0.0 if y1 <= y0 else (y1 - pos.y()) / (y1 - y0)
+        ratio = max(0.0, min(1.0, ratio))
+        return int(round(self._min + ratio * span))
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        if self._orientation == Qt.Orientation.Horizontal:
+            y = self.height() / 2
+            x0 = float(self._H_PAD)
+            x1 = float(self.width() - self._H_PAD)
+            pen = QPen(QColor("#474b55"), 2)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            p.drawLine(QPointF(x0, y), QPointF(x1, y))
+        else:
+            x = self.width() / 2
+            y0 = float(self._V_PAD)
+            y1 = float(self.height() - self._V_PAD)
+            track = QRectF(x - 8, y0, 16, max(y1 - y0, 1.0))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#2b2f38"))
+            p.drawRoundedRect(track, 8, 8)
+            p.setBrush(QColor("#3b404b"))
+            p.drawRoundedRect(QRectF(x - 2, y0 + 8, 4, max(y1 - y0 - 16, 1.0)), 2, 2)
+
+        handle = self._handle_center()
+        if self._orientation == Qt.Orientation.Horizontal:
+            p.setBrush(QColor("#676d79"))
+            p.setPen(QPen(QColor("#808692"), 1))
+            p.drawEllipse(handle, self._HANDLE_R, self._HANDLE_R)
+        else:
+            handle_rect = QRectF(handle.x() - 8, handle.y() - 3, 16, 6)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#5f6470"))
+            p.drawRoundedRect(handle_rect, 3, 3)
+
+        p.end()
+
+    def mousePressEvent(self, e: QMouseEvent) -> None:  # noqa: N802
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        self._dragging = True
+        self.setValue(self._pos_to_value(e.position()))
+
+    def mouseMoveEvent(self, e: QMouseEvent) -> None:  # noqa: N802
+        if self._dragging:
+            self.setValue(self._pos_to_value(e.position()))
+
+    def mouseReleaseEvent(self, _e) -> None:  # noqa: N802
+        if self._dragging:
+            self.value_committed.emit(self._value)
+        self._dragging = False
+
+
+class ColorEditorWheelWidget(QWidget):
+    color_changed = pyqtSignal(float, float)
+    color_change_finished = pyqtSignal(float, float)
+
+    def __init__(self, size: int = 258, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self._outer_radius = (size / 2) - 14
+        self._hue = 0.0
+        self._saturation = 0.0
+        self._dragging = False
+
+    def hue(self) -> float:
+        return self._hue
+
+    def saturation(self) -> float:
+        return self._saturation
+
+    def set_hs(self, hue: float, saturation: float, *, emit_signal: bool = True) -> None:
+        self._hue = float(hue) % 360.0
+        self._saturation = max(0.0, min(100.0, float(saturation)))
+        self.update()
+        if emit_signal:
+            self.color_changed.emit(self._hue, self._saturation)
+
+    def _center(self) -> QPointF:
+        return QPointF(self.width() / 2, self.height() / 2)
+
+    def _radius(self) -> float:
+        return self._outer_radius
+
+    def _marker_pos(self) -> QPointF:
+        center = self._center()
+        angle = math.radians(self._hue)
+        radius = self._radius() * (self._saturation / 100.0)
+        return QPointF(
+            center.x() + radius * math.cos(angle),
+            center.y() - radius * math.sin(angle),
+        )
+
+    def _update_from_pos(self, pos: QPointF, *, emit_signal: bool = True) -> None:
+        center = self._center()
+        dx = pos.x() - center.x()
+        dy = center.y() - pos.y()
+        hue = math.degrees(math.atan2(dy, dx)) % 360.0
+        saturation = min(100.0, (math.hypot(dx, dy) / max(self._radius(), 1.0)) * 100.0)
+        self.set_hs(hue, saturation, emit_signal=emit_signal)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        center = self._center()
+        outer = self._radius()
+
+        glow = QRadialGradient(center, outer + 8)
+        glow.setColorAt(0.0, QColor(36, 40, 48, 80))
+        glow.setColorAt(0.75, QColor(30, 33, 39, 35))
+        glow.setColorAt(1.0, QColor(24, 26, 31, 0))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(glow))
+        p.drawEllipse(center, outer + 8, outer + 8)
+
+        p.setBrush(QColor("#23262d"))
+        p.setPen(QPen(QColor("#2f343d"), 2))
+        p.drawEllipse(center, outer, outer)
+
+        p.setPen(QPen(QColor("#2a2d35"), 1))
+        p.drawEllipse(center, outer - 16, outer - 16)
+
+        marker = self._marker_pos()
+        p.setBrush(QColor.fromHsv(int(round(self._hue)) % 360, max(24, int(round(self._saturation * 2.55))), 220))
+        p.setPen(QPen(QColor("#dfe3ea"), 1.4))
+        p.drawEllipse(marker, 6.5, 6.5)
+
+        p.end()
+
+    def mousePressEvent(self, e: QMouseEvent) -> None:  # noqa: N802
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        self._dragging = True
+        self._update_from_pos(e.position())
+
+    def mouseMoveEvent(self, e: QMouseEvent) -> None:  # noqa: N802
+        if self._dragging:
+            self._update_from_pos(e.position())
+
+    def mouseReleaseEvent(self, _e) -> None:  # noqa: N802
+        if self._dragging:
+            self.color_change_finished.emit(self._hue, self._saturation)
+        self._dragging = False
+
+
+class ColorEditorPreviewStrip(QWidget):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(22)
+        self._input_color = QColor("#2d3139")
+        self._output_color = QColor("#2d3139")
+
+    def set_colors(self, input_color: QColor, output_color: QColor) -> None:
+        self._input_color = QColor(input_color)
+        self._output_color = QColor(output_color)
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(rect), 4, 4)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.fillPath(path, QColor("#242730"))
+
+        clip_left = QPainterPath()
+        clip_left.addRoundedRect(QRectF(rect.adjusted(0, 0, -rect.width() // 2, 0)), 4, 4)
+        p.fillPath(clip_left, self._input_color)
+
+        right_rect = QRectF(rect.x() + rect.width() / 2, rect.y(), rect.width() / 2, rect.height())
+        p.fillRect(right_rect, self._output_color)
+        p.setPen(QPen(QColor("#3c4049"), 1))
+        p.drawLine(int(rect.center().x()), rect.top() + 3, int(rect.center().x()), rect.bottom() - 3)
+        p.drawRoundedRect(QRectF(rect), 4, 4)
+        p.end()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # RIGHT PANEL
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1641,6 +2043,7 @@ class RightPanel(QWidget):
     layer_opacity_change_finished = pyqtSignal(int, float)
     adjust_section_changed = pyqtSignal(str, dict)
     adjust_section_change_finished = pyqtSignal(str, dict, str)
+    tool_requested = pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1659,6 +2062,12 @@ class RightPanel(QWidget):
         self._curve_editors: dict[str, CurveEditor] = {}
         self._curve_editor_meta: dict[CurveEditor, dict[str, str]] = {}
         self._syncing_adjust_controls = False
+        self._color_editor_wheel: Optional[ColorEditorWheelWidget] = None
+        self._color_editor_preview: Optional[ColorEditorPreviewStrip] = None
+        self._color_editor_input_hsl_label: Optional[QLabel] = None
+        self._color_editor_output_hsl_label: Optional[QLabel] = None
+        self._color_editor_lightness_slider: Optional[ThinSlider] = None
+        self._color_editor_lightness_label: Optional[QLabel] = None
         self._histogram_canvas: Optional[_HistogramCanvas] = None
         self._histogram_meta_labels: list[QLabel] = []
         self._histogram_format_badge: Optional[QLabel] = None
@@ -1947,8 +2356,16 @@ class RightPanel(QWidget):
             for editor, meta in self._curve_editor_meta.items():
                 raw_value = self._read_nested_value(adjust_state, meta["state_path"])
                 editor.set_points(raw_value if raw_value is not None else [{"x": 0, "y": 0}, {"x": 255, "y": 255}])
+            color_editor_state = adjust_state.get("color_editor", {}) if isinstance(adjust_state, dict) else {}
+            if self._color_editor_wheel is not None and isinstance(color_editor_state, dict):
+                self._color_editor_wheel.set_hs(
+                    float(color_editor_state.get("hue", 0)),
+                    float(color_editor_state.get("saturation", 0)),
+                    emit_signal=False,
+                )
         finally:
             self._syncing_adjust_controls = False
+        self._refresh_color_editor_labels()
 
     def set_histogram_data(self, histogram: Optional[dict[str, list[float]]]) -> None:
         if self._histogram_canvas is not None:
@@ -2434,6 +2851,7 @@ class RightPanel(QWidget):
             "影调":     self._build_tone_content,
             "曲线":     self._build_curves_content,
             "HSL":      self._build_hsl_content,
+            "色彩编辑器": self._build_color_editor_content,
             "颜色分级": self._build_color_grading_content,
             "可选颜色": self._build_selective_color_content,
             "细节":     self._build_detail_content,
@@ -2583,6 +3001,291 @@ class RightPanel(QWidget):
             )
 
         lo.addWidget(row)
+
+    def _add_thin_slider_row(
+        self,
+        lo: QVBoxLayout,
+        label: str,
+        value: int,
+        *,
+        min_val: int = -100,
+        max_val: int = 100,
+        section: Optional[str] = None,
+        param_path: Optional[str] = None,
+        display_label: Optional[str] = None,
+        on_change: Optional[Callable[[int], None]] = None,
+    ) -> ThinSlider:
+        row = QWidget()
+        row.setStyleSheet("background:transparent;")
+        row_lo = QVBoxLayout(row)
+        row_lo.setContentsMargins(0, 0, 0, 0)
+        row_lo.setSpacing(4)
+
+        top = QWidget()
+        top_lo = QHBoxLayout(top)
+        top_lo.setContentsMargins(0, 0, 0, 0)
+        top_lo.setSpacing(0)
+        top_lo.addWidget(_lbl(label, C_TEXT_2, 12))
+        top_lo.addStretch()
+        value_label = _lbl(str(value), C_TEXT_4, 11)
+        top_lo.addWidget(value_label)
+        row_lo.addWidget(top)
+
+        slider = ThinSlider(Qt.Orientation.Horizontal, min_val, max_val, value)
+        slider.value_changed.connect(lambda v, lb=value_label: lb.setText(str(v)))
+        if on_change is not None:
+            slider.value_changed.connect(on_change)
+        if section and param_path:
+            self._register_adjust_slider(
+                slider,
+                value_label,
+                section=section,
+                param_path=param_path,
+                display_label=display_label or label,
+            )
+        row_lo.addWidget(slider)
+        lo.addWidget(row)
+        return slider
+
+    def _format_color_editor_hsl(self, hue: float, saturation: int, lightness: int) -> str:
+        return f"H:{int(round(hue)):03d}  S:{int(round(saturation)):02d}  L:{int(round(lightness)):03d}"
+
+    def _color_editor_state_value(self, key: str, default: int = 0) -> int:
+        for slider, meta in self._adjust_slider_meta.items():
+            if meta.get("section") == "color_editor" and meta.get("param_path") == key:
+                try:
+                    return int(round(slider.value()))
+                except Exception:
+                    return default
+        return default
+
+    def _refresh_color_editor_labels(self) -> None:
+        if self._color_editor_wheel is None:
+            return
+        hue = self._color_editor_wheel.hue()
+        saturation = int(round(self._color_editor_wheel.saturation()))
+        lightness = self._color_editor_state_value("lightness")
+        hue_shift = self._color_editor_state_value("hue_shift")
+        saturation_shift = self._color_editor_state_value("saturation_shift")
+        luminance_shift = self._color_editor_state_value("luminance_shift")
+
+        output_hue = (hue + hue_shift) % 360
+        output_saturation = max(0, min(100, saturation + saturation_shift))
+        output_lightness = max(-100, min(100, lightness + luminance_shift))
+
+        if self._color_editor_input_hsl_label is not None:
+            self._color_editor_input_hsl_label.setText(
+                self._format_color_editor_hsl(hue, saturation, lightness)
+            )
+        if self._color_editor_output_hsl_label is not None:
+            self._color_editor_output_hsl_label.setText(
+                self._format_color_editor_hsl(output_hue, output_saturation, output_lightness)
+            )
+
+        if self._color_editor_preview is not None:
+            input_color = QColor.fromHsl(
+                int(round(hue)) % 360,
+                int(round(saturation * 2.55)),
+                int(round((lightness + 100) / 200 * 255)),
+            )
+            output_color = QColor.fromHsl(
+                int(round(output_hue)) % 360,
+                int(round(output_saturation * 2.55)),
+                int(round((output_lightness + 100) / 200 * 255)),
+            )
+            self._color_editor_preview.set_colors(input_color, output_color)
+
+    def _emit_color_editor_wheel_change(self, hue: float, saturation: float, *, committed: bool) -> None:
+        self._refresh_color_editor_labels()
+        payload = {
+            "hue": int(round(hue)) % 360,
+            "saturation": int(round(saturation)),
+        }
+        if self._syncing_adjust_controls:
+            return
+        if committed:
+            self.adjust_section_change_finished.emit("color_editor", payload, "色彩编辑器 · 取样颜色")
+        else:
+            self.adjust_section_changed.emit("color_editor", payload)
+
+    def apply_color_editor_sample(self, color: QColor, *, committed: bool = True) -> None:
+        hue, saturation, lightness, _alpha = color.getHsl()
+        hue_value = 0 if hue < 0 else int(hue)
+        saturation_value = int(round((saturation / 255.0) * 100.0))
+        lightness_value = int(round((lightness / 255.0) * 200.0 - 100.0))
+
+        self._syncing_adjust_controls = True
+        try:
+            if self._color_editor_wheel is not None:
+                self._color_editor_wheel.set_hs(hue_value, saturation_value, emit_signal=False)
+            if self._color_editor_lightness_slider is not None:
+                self._color_editor_lightness_slider.setValue(lightness_value, emit_signal=False)
+            if self._color_editor_lightness_label is not None:
+                self._color_editor_lightness_label.setText(str(lightness_value))
+        finally:
+            self._syncing_adjust_controls = False
+
+        self._refresh_color_editor_labels()
+        payload = {
+            "hue": hue_value,
+            "saturation": saturation_value,
+            "lightness": lightness_value,
+        }
+        if committed:
+            self.adjust_section_change_finished.emit("color_editor", payload, "色彩编辑器 · 取样颜色")
+        else:
+            self.adjust_section_changed.emit("color_editor", payload)
+
+    def _build_color_editor_content(self, lo: QVBoxLayout) -> None:
+        pick_button = QPushButton("用吸管在照片中吸取颜色")
+        pick_button.setIcon(_qicon("eyedropper", 14, C_TEXT_2))
+        pick_button.setIconSize(QSize(14, 14))
+        pick_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        pick_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        pick_button.setToolTip("启用吸管后，在照片上单击即可取样颜色")
+        pick_button.setStyleSheet(
+            f"QPushButton{{background:transparent; border:none; color:{C_TEXT_2};"
+            f"font-size:12px; text-align:left; padding:0;}}"
+            f"QPushButton:hover{{color:{C_TEXT_1};}}"
+            f"QPushButton:pressed{{color:{C_PRIMARY};}}"
+        )
+        pick_button.clicked.connect(lambda: self.tool_requested.emit("pipette"))
+        lo.addWidget(pick_button, 0, Qt.AlignmentFlag.AlignLeft)
+        lo.addSpacing(6)
+
+        wheel_row = QWidget()
+        wheel_lo = QHBoxLayout(wheel_row)
+        wheel_lo.setContentsMargins(0, 0, 0, 0)
+        wheel_lo.setSpacing(12)
+
+        self._color_editor_wheel = ColorEditorWheelWidget(size=258)
+        self._color_editor_wheel.color_changed.connect(
+            lambda hue, sat: self._emit_color_editor_wheel_change(hue, sat, committed=False)
+        )
+        self._color_editor_wheel.color_change_finished.connect(
+            lambda hue, sat: self._emit_color_editor_wheel_change(hue, sat, committed=True)
+        )
+        wheel_lo.addWidget(self._color_editor_wheel, 1)
+
+        lightness_col = QWidget()
+        lightness_lo = QVBoxLayout(lightness_col)
+        lightness_lo.setContentsMargins(0, 2, 0, 2)
+        lightness_lo.setSpacing(8)
+        lightness_lo.addStretch()
+        lightness_label = _lbl("0", C_TEXT_4, 11)
+        lightness_slider = ThinSlider(Qt.Orientation.Vertical, -100, 100, 0)
+        lightness_slider.value_changed.connect(lambda v, lb=lightness_label: lb.setText(str(v)))
+        lightness_slider.value_changed.connect(lambda _v: self._refresh_color_editor_labels())
+        lightness_lo.addWidget(lightness_slider, 0, Qt.AlignmentFlag.AlignHCenter)
+        lightness_lo.addWidget(lightness_label, 0, Qt.AlignmentFlag.AlignHCenter)
+        lightness_lo.addStretch()
+        wheel_lo.addWidget(lightness_col, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._color_editor_lightness_slider = lightness_slider
+        self._color_editor_lightness_label = lightness_label
+
+        self._register_adjust_slider(
+            lightness_slider,
+            lightness_label,
+            section="color_editor",
+            param_path="lightness",
+            display_label="色彩编辑器 · 明亮度",
+        )
+        wheel_lo.addStretch()
+        lo.addWidget(wheel_row)
+
+        self._color_editor_preview = ColorEditorPreviewStrip()
+        lo.addWidget(self._color_editor_preview)
+
+        hsl_row = QWidget()
+        hsl_lo = QHBoxLayout(hsl_row)
+        hsl_lo.setContentsMargins(0, 0, 0, 0)
+        hsl_lo.setSpacing(0)
+        self._color_editor_input_hsl_label = _lbl("H:---  S:--  L:---", C_TEXT_4, 11)
+        self._color_editor_output_hsl_label = _lbl("H:---  S:--  L:---", C_TEXT_4, 11)
+        hsl_lo.addWidget(self._color_editor_input_hsl_label)
+        hsl_lo.addStretch()
+        hsl_lo.addWidget(self._color_editor_output_hsl_label)
+        lo.addWidget(hsl_row)
+
+        pair_row = QWidget()
+        pair_lo = QHBoxLayout(pair_row)
+        pair_lo.setContentsMargins(0, 4, 0, 0)
+        pair_lo.setSpacing(8)
+
+        pair_left = QWidget()
+        pair_left_lo = QVBoxLayout(pair_left)
+        pair_left_lo.setContentsMargins(0, 0, 0, 0)
+        pair_left_lo.setSpacing(4)
+        self._add_thin_slider_row(
+            pair_left_lo,
+            "色彩平滑",
+            50,
+            min_val=0,
+            max_val=100,
+            section="color_editor",
+            param_path="color_smoothness",
+            display_label="色彩编辑器 · 色彩平滑",
+        )
+        pair_lo.addWidget(pair_left, 1)
+
+        link_btn = QPushButton("⇄")
+        link_btn.setCheckable(True)
+        link_btn.setChecked(True)
+        link_btn.setFixedSize(30, 30)
+        link_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        link_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        link_btn.setStyleSheet(
+            f"QPushButton{{background:{C_BG_ITEM}; color:{C_TEXT_3}; border:none; border-radius:6px; font-size:13px;}}"
+            f"QPushButton:hover{{background:#363a42; color:{C_TEXT_1};}}"
+            f"QPushButton:checked{{background:#3a3e47; color:{C_TEXT_1};}}"
+        )
+        pair_lo.addWidget(link_btn, 0, Qt.AlignmentFlag.AlignBottom)
+
+        pair_right = QWidget()
+        pair_right_lo = QVBoxLayout(pair_right)
+        pair_right_lo.setContentsMargins(0, 0, 0, 0)
+        pair_right_lo.setSpacing(4)
+        self._add_thin_slider_row(
+            pair_right_lo,
+            "亮度平滑",
+            50,
+            min_val=0,
+            max_val=100,
+            section="color_editor",
+            param_path="luminance_smoothness",
+            display_label="色彩编辑器 · 亮度平滑",
+        )
+        pair_lo.addWidget(pair_right, 1)
+        lo.addWidget(pair_row)
+
+        self._add_thin_slider_row(
+            lo,
+            "色相偏移",
+            0,
+            section="color_editor",
+            param_path="hue_shift",
+            display_label="色彩编辑器 · 色相偏移",
+            on_change=lambda _v: self._refresh_color_editor_labels(),
+        )
+        self._add_thin_slider_row(
+            lo,
+            "饱和度偏移",
+            0,
+            section="color_editor",
+            param_path="saturation_shift",
+            display_label="色彩编辑器 · 饱和度偏移",
+            on_change=lambda _v: self._refresh_color_editor_labels(),
+        )
+        self._add_thin_slider_row(
+            lo,
+            "明亮度偏移",
+            0,
+            section="color_editor",
+            param_path="luminance_shift",
+            display_label="色彩编辑器 · 明亮度偏移",
+            on_change=lambda _v: self._refresh_color_editor_labels(),
+        )
+        self._refresh_color_editor_labels()
 
     # ── 影调 section ──────────────────────────────────────────────────────────
 
@@ -3086,12 +3789,44 @@ class MainEditorWindow(QWidget):
     title_changed = pyqtSignal(str)
     _PREVIEW_REFRESH_INTERVAL_MS = 24
     _HISTOGRAM_REFRESH_INTERVAL_MS = 160
-    _MIN_PREVIEW_MAX_DIMENSION = 1600
+    _FIXED_PREVIEW_MAX_DIMENSION = 1024
     _HISTOGRAM_RENDER_MAX_DIMENSION = 480
+    _EXPORT_FILTER_JPEG = "JPEG (*.jpg *.jpeg)"
+    _EXPORT_FILTER_PNG = "PNG (*.png)"
+    _EXPORT_FILTER_WEBP = "WebP (*.webp)"
+    _EXPORT_FILTER_TIFF = "TIFF (*.tiff *.tif)"
+    _EXPORT_FILTER_BMP = "BMP (*.bmp)"
+    _EXPORT_FILTERS = ";;".join((
+        _EXPORT_FILTER_JPEG,
+        _EXPORT_FILTER_PNG,
+        _EXPORT_FILTER_WEBP,
+        _EXPORT_FILTER_TIFF,
+        _EXPORT_FILTER_BMP,
+    ))
+    _EXPORT_FILTER_TO_EXTENSION = {
+        _EXPORT_FILTER_JPEG: ".jpg",
+        _EXPORT_FILTER_PNG: ".png",
+        _EXPORT_FILTER_WEBP: ".webp",
+        _EXPORT_FILTER_TIFF: ".tiff",
+        _EXPORT_FILTER_BMP: ".bmp",
+    }
+    _EXPORT_EXTENSION_TO_FORMAT = {
+        ".jpg": "JPEG",
+        ".jpeg": "JPEG",
+        ".png": "PNG",
+        ".webp": "WEBP",
+        ".tif": "TIFF",
+        ".tiff": "TIFF",
+        ".bmp": "BMP",
+    }
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._current_tlimage: Optional[TLImage] = None
+        self._export_thread: Optional[QThread] = None
+        self._export_worker: Optional[ExportWorker] = None
+        self._export_progress_dialog: Optional[ExportProgressDialog] = None
+        self._pending_export_error: Optional[str] = None
         self._preview_refresh_timer = QTimer(self)
         self._preview_refresh_timer.setSingleShot(True)
         self._preview_refresh_timer.timeout.connect(self._flush_preview_refresh)
@@ -3167,8 +3902,11 @@ class MainEditorWindow(QWidget):
     # ── signals ───────────────────────────────────────────────────────────────
     def _connect_signals(self) -> None:
         self._tool_sidebar.tool_changed.connect(self._opts_bar.set_tool)
+        self._tool_sidebar.tool_changed.connect(self._canvas.set_tool)
+        self._right_panel.tool_requested.connect(self._tool_sidebar.set_active_tool)
 
         self._canvas.zoom_changed.connect(self._on_zoom_changed)
+        self._canvas.color_picked.connect(self._on_canvas_color_picked)
         self._status_bar.zoom_in_requested.connect(self._zoom_in)
         self._status_bar.zoom_out_requested.connect(self._zoom_out)
 
@@ -3202,10 +3940,7 @@ class MainEditorWindow(QWidget):
         return True
 
     def _preview_max_dimension(self) -> int:
-        app = QApplication.instance()
-        ratio = app.primaryScreen().devicePixelRatio() if app and app.primaryScreen() else 1.0
-        viewport_max = max(self._canvas.width(), self._canvas.height(), 1)
-        return max(self._MIN_PREVIEW_MAX_DIMENSION, int(round(viewport_max * ratio * 2.0)))
+        return self._FIXED_PREVIEW_MAX_DIMENSION
 
     def _pil_to_pixmap(self, image) -> QPixmap:
         return QPixmap.fromImage(ImageQt(image))
@@ -3336,6 +4071,22 @@ class MainEditorWindow(QWidget):
         QShortcut(QKeySequence.StandardKey.Open, self, self._open_image)
         QShortcut(QKeySequence.StandardKey.Save, self, self._save_image)
         QShortcut(QKeySequence("Ctrl+Shift+E"), self, self._export_image)
+        tool_shortcuts = {
+            "V": "mouse-pointer",
+            "C": "crop",
+            "P": "pen-tool",
+            "B": "paintbrush",
+            "E": "eraser",
+            "T": "type",
+            "I": "pipette",
+            "S": "stamp",
+        }
+        for key, tool_name in tool_shortcuts.items():
+            QShortcut(
+                QKeySequence(key),
+                self,
+                lambda tool_name=tool_name: self._tool_sidebar.set_active_tool(tool_name),
+            )
 
     # action handlers
     def _open_image(self) -> None:
@@ -3354,16 +4105,115 @@ class MainEditorWindow(QWidget):
     def _save_image(self) -> None:
         pass
 
-    def _export_image(self) -> None:
+    def _default_export_path(self) -> Path:
         if self._current_tlimage is None:
+            return Path.home() / "Desktop" / "export.jpg"
+        source_path = Path(self._current_tlimage.image_path)
+        default_dir = source_path.parent if source_path.parent.exists() else (Path.home() / "Desktop")
+        return default_dir / f"{source_path.stem}.jpg"
+
+    def _normalize_export_target(self, path: str, selected_filter: str) -> tuple[str, str]:
+        target = Path(path).expanduser()
+        selected_extension = self._EXPORT_FILTER_TO_EXTENSION.get(selected_filter, ".jpg")
+        suffix = target.suffix.lower()
+
+        if suffix not in self._EXPORT_EXTENSION_TO_FORMAT:
+            target = target.with_suffix(selected_extension)
+            suffix = selected_extension
+
+        export_format = self._EXPORT_EXTENSION_TO_FORMAT.get(suffix, "JPEG")
+        return str(target), export_format
+
+    def _sync_export_dialog_filename(self, dialog: QFileDialog, selected_filter: str) -> None:
+        selected_files = dialog.selectedFiles()
+        current_path = Path(selected_files[0]).expanduser() if selected_files else self._default_export_path()
+        selected_extension = self._EXPORT_FILTER_TO_EXTENSION.get(selected_filter, ".jpg")
+        dialog.selectFile(str(current_path.with_suffix(selected_extension)))
+
+    def _start_export(self, export_path: str, export_format: str) -> None:
+        if self._current_tlimage is None or self._export_thread is not None:
             return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export Image",
-            str(Path.home() / "Desktop" / "export.jpg"),
-            "JPEG (*.jpg *.jpeg);;PNG (*.png);;WebP (*.webp);;TIFF (*.tiff)",
+
+        snapshot = self._current_tlimage.to_dict()
+        self._pending_export_error = None
+        self._export_progress_dialog = ExportProgressDialog(self.window())
+        self._export_progress_dialog.update_progress(0, "准备导出…")
+        self._export_progress_dialog.show()
+
+        QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
+
+        self._export_thread = QThread(self)
+        self._export_worker = ExportWorker(snapshot, export_path, export_format)
+        self._export_worker.moveToThread(self._export_thread)
+        self._export_thread.started.connect(self._export_worker.run)
+        self._export_worker.progress_changed.connect(self._on_export_progress)
+        self._export_worker.finished.connect(self._on_export_finished)
+        self._export_worker.failed.connect(self._on_export_failed)
+        self._export_worker.finished.connect(self._export_thread.quit)
+        self._export_worker.failed.connect(self._export_thread.quit)
+        self._export_worker.finished.connect(self._export_worker.deleteLater)
+        self._export_worker.failed.connect(self._export_worker.deleteLater)
+        self._export_thread.finished.connect(self._cleanup_export)
+        self._export_thread.finished.connect(self._export_thread.deleteLater)
+        self._export_thread.start()
+
+    def _on_export_progress(self, value: int, message: str) -> None:
+        if self._export_progress_dialog is not None:
+            self._export_progress_dialog.update_progress(value, message)
+
+    def _on_export_finished(self, export_path: str) -> None:
+        if self._export_progress_dialog is not None:
+            self._export_progress_dialog.update_progress(100, "导出完成")
+
+    def _on_export_failed(self, error_message: str) -> None:
+        self._pending_export_error = error_message
+        if self._export_progress_dialog is not None:
+            self._export_progress_dialog.update_progress(100, "导出失败")
+
+    def _cleanup_export(self) -> None:
+        if self._export_progress_dialog is not None:
+            self._export_progress_dialog.close()
+            self._export_progress_dialog.deleteLater()
+            self._export_progress_dialog = None
+        if QApplication.overrideCursor() is not None:
+            QApplication.restoreOverrideCursor()
+        self._export_worker = None
+        self._export_thread = None
+        if self._pending_export_error:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Export Failed", f"Unable to export image:\n\n{self._pending_export_error}")
+            self._pending_export_error = None
+
+    def _export_image(self) -> None:
+        if self._current_tlimage is None or self._export_thread is not None:
+            return
+        default_path = self._default_export_path()
+        dialog = QFileDialog(self, "Export Image", str(default_path.parent))
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dialog.setFileMode(QFileDialog.FileMode.AnyFile)
+        dialog.setNameFilters([
+            self._EXPORT_FILTER_JPEG,
+            self._EXPORT_FILTER_PNG,
+            self._EXPORT_FILTER_WEBP,
+            self._EXPORT_FILTER_TIFF,
+            self._EXPORT_FILTER_BMP,
+        ])
+        dialog.selectNameFilter(self._EXPORT_FILTER_JPEG)
+        dialog.selectFile(default_path.name)
+        dialog.filterSelected.connect(lambda name_filter: self._sync_export_dialog_filename(dialog, name_filter))
+
+        if not dialog.exec():
+            return
+
+        selected_files = dialog.selectedFiles()
+        if not selected_files:
+            return
+
+        export_path, export_format = self._normalize_export_target(
+            selected_files[0],
+            dialog.selectedNameFilter(),
         )
-        if path:
-            self._current_tlimage.render_to_path(path)
+        self._start_export(export_path, export_format)
 
     def _undo(self) -> None:
         if self._current_tlimage is None:
@@ -3427,7 +4277,16 @@ class MainEditorWindow(QWidget):
         self._request_histogram_refresh(immediate=True)
         self._right_panel.set_history_entries(self._current_tlimage.history_entries())
 
+    def _on_canvas_color_picked(self, color: QColor) -> None:
+        if self._current_tlimage is None:
+            return
+        self._right_panel.apply_color_editor_sample(color, committed=True)
+        self._tool_sidebar.set_active_tool("mouse-pointer")
+
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._export_thread is not None:
+            event.ignore()
+            return
         self._shutdown_histogram_process()
         super().closeEvent(event)
 
