@@ -177,6 +177,10 @@ class GeometryParams:
     scale: float = 100
     offset_x: float = 0
     offset_y: float = 0
+    crop_top: float = 0.0
+    crop_left: float = 0.0
+    crop_bottom: float = 1.0
+    crop_right: float = 1.0
 
 
 @dataclass
@@ -1163,6 +1167,18 @@ class AdjustmentMalayer(TabMalayer):
     def _apply_geometry(self, image: Image.Image) -> Image.Image:
         geometry = self.params.geometry
         result = image
+
+        # --- 裁剪（第一个几何操作）---
+        if (geometry.crop_left > 0.0 or geometry.crop_top > 0.0 or
+                geometry.crop_right < 1.0 or geometry.crop_bottom < 1.0):
+            width, height = result.size
+            left = max(0, int(geometry.crop_left * width))
+            top = max(0, int(geometry.crop_top * height))
+            right = min(width, int(geometry.crop_right * width))
+            bottom = min(height, int(geometry.crop_bottom * height))
+            if right > left and bottom > top:
+                result = result.crop((left, top, right, bottom))
+
         if cv2 is not None and (geometry.horizontal or geometry.vertical):
             width, height = result.size
             max_x_shift = width * 0.35

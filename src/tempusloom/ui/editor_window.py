@@ -645,6 +645,8 @@ class CanvasArea(QWidget):
 
     zoom_changed = pyqtSignal(int)   # zoom % (e.g. 75)
     color_picked = pyqtSignal(QColor)
+    crop_confirmed = pyqtSignal(float, float, float, float)  # left, top, right, bottom (ratios)
+    crop_cancelled = pyqtSignal()
 
     _MIN_ZOOM = 5
     _MAX_ZOOM = 800
@@ -666,6 +668,15 @@ class CanvasArea(QWidget):
         self._show_grid  = False
         self._show_ruler = False
         self._active_tool = "mouse-pointer"
+
+        # crop tool state
+        self._crop_active = False
+        self._crop_rect = QRectF()
+        self._crop_drawing = False
+        self._crop_drag_start = QPointF()
+        self._crop_handle_size = 8
+        self._crop_active_handle: Optional[str] = None
+        self._original_image_size: Optional[tuple[int, int]] = None
 
         # placeholder label
         self._placeholder = QLabel(
@@ -695,20 +706,169 @@ class CanvasArea(QWidget):
         self._compare_btn.pressed.connect(self._show_original_preview)
         self._compare_btn.released.connect(self._show_edited_preview)
         self._compare_btn.hide()
+
+        # crop confirm / cancel buttons
+        self._crop_confirm_btn = QPushButton(self)
+        self._crop_confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._crop_confirm_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._crop_confirm_btn.setFixedHeight(28)
+        self._crop_confirm_btn.setText("\u2713  确认")
+        self._crop_confirm_btn.setStyleSheet(
+            f"QPushButton{{background:{C_PRIMARY}; color:{C_WHITE}; border:none;"
+            f"border-radius:4px; font-size:12px; padding:0 16px;}}"
+            f"QPushButton:hover{{background:#5a8cff;}}"
+            f"QPushButton:pressed{{background:#2a5ad4;}}"
+        )
+        self._crop_confirm_btn.clicked.connect(self._commit_crop)
+        self._crop_confirm_btn.hide()
+
+        self._crop_cancel_btn = QPushButton(self)
+        self._crop_cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._crop_cancel_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._crop_cancel_btn.setFixedHeight(28)
+        self._crop_cancel_btn.setText("\u2715  取消")
+        self._crop_cancel_btn.setStyleSheet(
+            f"QPushButton{{background:rgba(255,255,255,0.12); color:{C_TEXT_1};"
+            f"border:1px solid rgba(255,255,255,0.15); border-radius:4px;"
+            f"font-size:12px; padding:0 16px;}}"
+            f"QPushButton:hover{{background:rgba(255,255,255,0.2);}}"
+            f"QPushButton:pressed{{background:rgba(255,255,255,0.08);}}"
+        )
+        self._crop_cancel_btn.clicked.connect(self._cancel_crop)
+        self._crop_cancel_btn.hide()
+
         self.setAcceptDrops(True)
 
     def set_tool(self, tool_name: str) -> None:
+        if self._active_tool == "crop" and tool_name != "crop":
+            self._clear_crop_overlay()
         self._active_tool = tool_name
+        if tool_name == "crop":
+            self._init_crop_tool()
         self._refresh_cursor()
 
     def _refresh_cursor(self) -> None:
         if self._panning:
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
+        if self._active_tool == "crop":
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            return
         if self._active_tool == "pipette" and self._display_pixmap() is not None:
             self.setCursor(Qt.CursorShape.CrossCursor)
             return
         self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    # ── crop helpers ──────────────────────────────────────────────────────────
+    def set_original_image_size(self, width: int, height: int) -> None:
+        self._original_image_size = (width, height)
+
+    def _init_crop_tool(self) -> None:
+        self._crop_drawing = False
+        self._crop_active_handle = None
+        rect = self._image_rect()
+        if rect is None:
+            self._crop_active = False
+            return
+        self._crop_active = True
+        self._crop_rect = QRectF(rect)
+        self.update()
+
+    def _clear_crop_overlay(self) -> None:
+        self._crop_active = False
+        self._crop_drawing = False
+        self._crop_rect = QRectF()
+        self._crop_active_handle = None
+        self._crop_confirm_btn.hide()
+        self._crop_cancel_btn.hide()
+        self.update()
+
+    def _canvas_pos_to_crop_ratio(self, pos: QPointF) -> tuple[float, float]:
+        rect = self._image_rect()
+        if rect is None:
+            return 0.0, 0.0
+        rel_x = (pos.x() - rect.left()) / max(rect.width(), 1.0)
+        rel_y = (pos.y() - rect.top()) / max(rect.height(), 1.0)
+        return max(0.0, min(1.0, rel_x)), max(0.0, min(1.0, rel_y))
+
+    def _crop_handles(self) -> dict[str, QRectF]:
+        handles: dict[str, QRectF] = {}
+        hs = self._crop_handle_size
+        r = self._crop_rect
+        # corner handles — larger hit target
+        handles["top-left"] = QRectF(r.left() - hs, r.top() - hs, hs * 2, hs * 2)
+        handles["top-right"] = QRectF(r.right() - hs, r.top() - hs, hs * 2, hs * 2)
+        handles["bottom-left"] = QRectF(r.left() - hs, r.bottom() - hs, hs * 2, hs * 2)
+        handles["bottom-right"] = QRectF(r.right() - hs, r.bottom() - hs, hs * 2, hs * 2)
+        # edge midpoint handles
+        mid_x = r.left() + r.width() / 2
+        mid_y = r.top() + r.height() / 2
+        handles["top"] = QRectF(mid_x - hs * 1.5, r.top() - hs, hs * 3, hs * 2)
+        handles["bottom"] = QRectF(mid_x - hs * 1.5, r.bottom() - hs, hs * 3, hs * 2)
+        handles["left"] = QRectF(r.left() - hs, mid_y - hs * 1.5, hs * 2, hs * 3)
+        handles["right"] = QRectF(r.right() - hs, mid_y - hs * 1.5, hs * 2, hs * 3)
+        return handles
+
+    def _hit_test_crop_handle(self, pos: QPointF) -> Optional[str]:
+        if not self._crop_active or self._crop_rect.isNull():
+            return None
+        for name, handle_rect in self._crop_handles().items():
+            if handle_rect.contains(pos):
+                return name
+        return None
+
+    def _cursor_for_crop_handle(self, handle: Optional[str]) -> Qt.CursorShape:
+        _CURSOR_MAP: dict[str, Qt.CursorShape] = {
+            "top-left": Qt.CursorShape.SizeFDiagCursor,
+            "bottom-right": Qt.CursorShape.SizeFDiagCursor,
+            "top-right": Qt.CursorShape.SizeBDiagCursor,
+            "bottom-left": Qt.CursorShape.SizeBDiagCursor,
+            "top": Qt.CursorShape.SizeVerCursor,
+            "bottom": Qt.CursorShape.SizeVerCursor,
+            "left": Qt.CursorShape.SizeHorCursor,
+            "right": Qt.CursorShape.SizeHorCursor,
+        }
+        return _CURSOR_MAP.get(handle, Qt.CursorShape.CrossCursor)
+
+    def _update_crop_rect_from_drag(self, current_pos: QPointF) -> None:
+        img_rect = self._image_rect()
+        if img_rect is None:
+            return
+        clamped_x = max(img_rect.left(), min(img_rect.right(), current_pos.x()))
+        clamped_y = max(img_rect.top(), min(img_rect.bottom(), current_pos.y()))
+        clamped = QPointF(clamped_x, clamped_y)
+        if self._crop_active_handle is None:
+            self._crop_rect = QRectF(self._crop_drag_start, clamped).normalized()
+        else:
+            r = QRectF(self._crop_rect)
+            if "left" in self._crop_active_handle:
+                r.setLeft(clamped.x())
+            if "right" in self._crop_active_handle:
+                r.setRight(clamped.x())
+            if "top" in self._crop_active_handle:
+                r.setTop(clamped.y())
+            if "bottom" in self._crop_active_handle:
+                r.setBottom(clamped.y())
+            self._crop_rect = r.normalized()
+
+    def _commit_crop(self) -> None:
+        if self._crop_rect.isNull() or not self._crop_rect.isValid():
+            return
+        img_rect = self._image_rect()
+        if img_rect is None:
+            return
+        left_r, top_r = self._canvas_pos_to_crop_ratio(self._crop_rect.topLeft())
+        right_r, bottom_r = self._canvas_pos_to_crop_ratio(self._crop_rect.bottomRight())
+        left_r = max(0.0, min(1.0, left_r))
+        top_r = max(0.0, min(1.0, top_r))
+        right_r = max(0.0, min(1.0, right_r))
+        bottom_r = max(0.0, min(1.0, bottom_r))
+        self.crop_confirmed.emit(left_r, top_r, right_r, bottom_r)
+        self._clear_crop_overlay()
+
+    def _cancel_crop(self) -> None:
+        self.crop_cancelled.emit()
+        self._clear_crop_overlay()
 
     def _display_pixmap(self) -> Optional[QPixmap]:
         if self._compare_mode and self._original_pixmap and not self._original_pixmap.isNull():
@@ -732,6 +892,28 @@ class CanvasArea(QWidget):
         margin = 16
         self._compare_btn.move(self.width() - self._compare_btn.width() - margin,
                                self.height() - self._compare_btn.height() - margin)
+
+    def _position_crop_buttons(self) -> None:
+        if (not self._crop_active or self._crop_drawing
+                or self._crop_rect.isNull() or not self._crop_rect.isValid()):
+            self._crop_confirm_btn.hide()
+            self._crop_cancel_btn.hide()
+            return
+        gap = 8
+        margin = 8
+        confirm_w = self._crop_confirm_btn.sizeHint().width()
+        cancel_w = self._crop_cancel_btn.sizeHint().width()
+        total_w = confirm_w + gap + cancel_w
+        x = int(self._crop_rect.right() - total_w - margin)
+        y = int(self._crop_rect.bottom() + margin)
+        self._crop_confirm_btn.move(x, y)
+        self._crop_confirm_btn.setFixedWidth(confirm_w)
+        self._crop_cancel_btn.move(x + confirm_w + gap, y)
+        self._crop_cancel_btn.setFixedWidth(cancel_w)
+        self._crop_confirm_btn.show()
+        self._crop_cancel_btn.show()
+        self._crop_confirm_btn.raise_()
+        self._crop_cancel_btn.raise_()
 
     def _image_rect(self) -> Optional[QRectF]:
         px = self._display_pixmap()
@@ -881,7 +1063,120 @@ class CanvasArea(QWidget):
                 while y < dest.bottom():
                     p.drawLine(QPointF(dest.left(), y), QPointF(dest.right(), y))
                     y += step
+
+            # crop overlay
+            if self._active_tool == "crop" and self._crop_active and not self._crop_rect.isNull():
+                self._paint_crop_overlay(p, dest)
         p.end()
+        self._position_crop_buttons()
+
+    # ── crop overlay painting ──────────────────────────────────────────────────
+    def _paint_crop_overlay(self, p: QPainter, image_rect: QRectF) -> None:
+        if self._crop_rect.isNull() or not self._crop_rect.isValid():
+            return
+        if not image_rect.isValid():
+            return
+        crop = self._crop_rect.intersected(image_rect)
+        if crop.isNull() or not crop.isValid():
+            return
+        if crop.width() < 2 or crop.height() < 2:
+            return
+
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        # dark overlay outside crop area
+        overlay_color = QColor(0, 0, 0, 160)
+        top_h = crop.top() - image_rect.top()
+        if top_h > 0:
+            p.fillRect(QRectF(image_rect.left(), image_rect.top(),
+                              image_rect.width(), top_h), overlay_color)
+        bot_h = image_rect.bottom() - crop.bottom()
+        if bot_h > 0:
+            p.fillRect(QRectF(image_rect.left(), crop.bottom(),
+                              image_rect.width(), bot_h), overlay_color)
+        left_w = crop.left() - image_rect.left()
+        if left_w > 0:
+            p.fillRect(QRectF(image_rect.left(), crop.top(),
+                              left_w, crop.height()), overlay_color)
+        right_w = image_rect.right() - crop.right()
+        if right_w > 0:
+            p.fillRect(QRectF(crop.right(), crop.top(),
+                              right_w, crop.height()), overlay_color)
+
+        # rule-of-thirds lines
+        p.setPen(QPen(QColor(255, 255, 255, 40), 1))
+        third_w = crop.width() / 3.0
+        third_h = crop.height() / 3.0
+        for i in range(1, 3):
+            x = crop.left() + i * third_w
+            p.drawLine(QPointF(x, crop.top()), QPointF(x, crop.bottom()))
+            y = crop.top() + i * third_h
+            p.drawLine(QPointF(crop.left(), y), QPointF(crop.right(), y))
+
+        # border
+        p.setPen(QPen(QColor(255, 255, 255, 180), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(crop)
+
+        # L-shaped corner brackets (like Lightroom)
+        bracket_len = min(20.0, crop.width() / 4.0, crop.height() / 4.0)
+        bracket_w = 2.5
+        bracket_color = QColor(255, 255, 255, 230)
+        p.setPen(QPen(bracket_color, bracket_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.SquareCap))
+        corners = [
+            (crop.topLeft(), QPointF(crop.left() + bracket_len, crop.top()), QPointF(crop.left(), crop.top() + bracket_len)),
+            (crop.topRight(), QPointF(crop.right() - bracket_len, crop.top()), QPointF(crop.right(), crop.top() + bracket_len)),
+            (crop.bottomLeft(), QPointF(crop.left() + bracket_len, crop.bottom()), QPointF(crop.left(), crop.bottom() - bracket_len)),
+            (crop.bottomRight(), QPointF(crop.right() - bracket_len, crop.bottom()), QPointF(crop.right(), crop.bottom() - bracket_len)),
+        ]
+        for _corner, h_end, v_end in corners:
+            p.drawLine(_corner, h_end)
+            p.drawLine(_corner, v_end)
+
+        # edge midpoint handles — small rounded rects
+        handle_size = 5
+        handle_color = QColor(255, 255, 255, 200)
+        edge_handles = [
+            QPointF(crop.left() + crop.width() / 2, crop.top()),       # top
+            QPointF(crop.left() + crop.width() / 2, crop.bottom()),    # bottom
+            QPointF(crop.left(), crop.top() + crop.height() / 2),      # left
+            QPointF(crop.right(), crop.top() + crop.height() / 2),     # right
+        ]
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(handle_color)
+        for pt in edge_handles:
+            p.drawRoundedRect(QRectF(pt.x() - handle_size, pt.y() - handle_size / 2,
+                                     handle_size * 2, handle_size), 2, 2)
+        for pt in [edge_handles[2], edge_handles[3]]:
+            p.drawRoundedRect(QRectF(pt.x() - handle_size / 2, pt.y() - handle_size,
+                                     handle_size, handle_size * 2), 2, 2)
+
+        # dimension label — pill-shaped badge
+        left_r, top_r = self._canvas_pos_to_crop_ratio(self._crop_rect.topLeft())
+        right_r, bottom_r = self._canvas_pos_to_crop_ratio(self._crop_rect.bottomRight())
+        if self._original_image_size:
+            orig_w, orig_h = self._original_image_size
+        else:
+            px = self._display_pixmap()
+            orig_w = px.width() if px else 0
+            orig_h = px.height() if px else 0
+        crop_w = max(1, int((right_r - left_r) * orig_w))
+        crop_h = max(1, int((bottom_r - top_r) * orig_h))
+        label = f"{crop_w} \u00d7 {crop_h}"
+        p.setFont(QFont("Arial", 10, QFont.Weight.Medium))
+        fm = p.fontMetrics()
+        text_w = fm.horizontalAdvance(label) + 16
+        text_h = fm.height() + 8
+        badge_x = crop.left() + (crop.width() - text_w) / 2
+        badge_y = crop.top() - text_h - 6
+        if badge_y < image_rect.top():
+            badge_y = crop.bottom() + 6
+        badge_rect = QRectF(badge_x, badge_y, text_w, text_h)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, 190))
+        p.drawRoundedRect(badge_rect, text_h / 2, text_h / 2)
+        p.setPen(QColor(255, 255, 255, 210))
+        p.drawText(badge_rect, Qt.AlignmentFlag.AlignCenter, label)
 
     # ── events ────────────────────────────────────────────────────────────────
     def resizeEvent(self, _event) -> None:             # noqa: N802
@@ -910,12 +1205,31 @@ class CanvasArea(QWidget):
             super().wheelEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:   # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and self._active_tool == "pipette":
-            color = self._sample_color(event.position())
-            if color is not None:
-                self.color_picked.emit(color)
-                event.accept()
-                return
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position()
+            if self._active_tool == "crop" and self._crop_active:
+                handle = self._hit_test_crop_handle(pos)
+                if handle:
+                    self._crop_active_handle = handle
+                    self._crop_drawing = True
+                    self._crop_drag_start = pos
+                    event.accept()
+                    return
+                else:
+                    img_rect = self._image_rect()
+                    if img_rect and img_rect.contains(pos):
+                        self._crop_drawing = True
+                        self._crop_active_handle = None
+                        self._crop_drag_start = pos
+                        self._crop_rect = QRectF(pos, pos)
+                        event.accept()
+                        return
+            if self._active_tool == "pipette":
+                color = self._sample_color(pos)
+                if color is not None:
+                    self.color_picked.emit(color)
+                    event.accept()
+                    return
         if (event.button() == Qt.MouseButton.MiddleButton or
                 QApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier):
             self._panning = True
@@ -924,18 +1238,47 @@ class CanvasArea(QWidget):
             self._refresh_cursor()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:    # noqa: N802
+        pos = event.position()
+        if self._crop_drawing and self._active_tool == "crop":
+            self._update_crop_rect_from_drag(pos)
+            self.update()
+            return
+        if self._active_tool == "crop" and self._crop_active and not self._crop_drawing:
+            handle = self._hit_test_crop_handle(pos)
+            self.setCursor(self._cursor_for_crop_handle(handle))
         if self._panning:
             delta = event.position() - self._pan_start
             self._offset = self._pan_offset_start + delta
             self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None: # noqa: N802
+        if self._crop_drawing and event.button() == Qt.MouseButton.LeftButton:
+            self._crop_drawing = False
+            self._crop_active_handle = None
+            if self._crop_rect.width() < 10 or self._crop_rect.height() < 10:
+                img_rect = self._image_rect()
+                if img_rect:
+                    self._crop_rect = QRectF(img_rect)
+            self.update()
+            return
         if self._panning:
             self._panning = False
             self._refresh_cursor()
 
     def mouseDoubleClickEvent(self, _event) -> None:         # noqa: N802
         self._fit_to_window()
+
+    def keyPressEvent(self, event) -> None:                 # noqa: N802
+        if self._active_tool == "crop" and self._crop_active:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self._commit_crop()
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Escape:
+                self._cancel_crop()
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     # ── drag-drop ─────────────────────────────────────────────────────────────
     def dragEnterEvent(self, event) -> None:           # noqa: N802
@@ -4485,6 +4828,8 @@ class MainEditorWindow(QWidget):
 
         self._canvas.zoom_changed.connect(self._on_zoom_changed)
         self._canvas.color_picked.connect(self._on_canvas_color_picked)
+        self._canvas.crop_confirmed.connect(self._on_crop_confirmed)
+        self._canvas.crop_cancelled.connect(self._on_crop_cancelled)
         self._status_bar.zoom_in_requested.connect(self._zoom_in)
         self._status_bar.zoom_out_requested.connect(self._zoom_out)
         self._ai_chatbox.request_submitted.connect(self._on_ai_chat_requested)
@@ -4512,6 +4857,7 @@ class MainEditorWindow(QWidget):
         self._original_preview_pixmap = None
         original_pixmap = self._get_original_preview_pixmap(tl_image, preview_max_dimension)
         self._canvas.set_pixmaps(edited_pixmap, original_pixmap, reset_view=True)
+        self._canvas.set_original_image_size(*tl_image.image_size())
         self._ai_chatbox.set_image_context(Path(path).name)
         self._sync_right_panel_from_tlimage()
         self._right_panel.set_histogram_data(None)
@@ -4862,6 +5208,23 @@ class MainEditorWindow(QWidget):
         if self._current_tlimage is None:
             return
         self._right_panel.apply_color_editor_sample(color, committed=True)
+        self._tool_sidebar.set_active_tool("mouse-pointer")
+
+    def _on_crop_confirmed(self, left_r: float, top_r: float, right_r: float, bottom_r: float) -> None:
+        if self._current_tlimage is None:
+            return
+        self._current_tlimage.update_adjustment(
+            "geometry",
+            {"crop_left": left_r, "crop_top": top_r, "crop_right": right_r, "crop_bottom": bottom_r},
+            record_history=True,
+            description="裁剪",
+        )
+        self._apply_preview_to_canvas(reset_view=True)
+        self._request_histogram_refresh(immediate=True)
+        self._right_panel.set_history_entries(self._current_tlimage.history_entries())
+        self._tool_sidebar.set_active_tool("mouse-pointer")
+
+    def _on_crop_cancelled(self) -> None:
         self._tool_sidebar.set_active_tool("mouse-pointer")
 
     def _open_ai_settings_dialog(self) -> None:
