@@ -293,18 +293,35 @@ class AdjustmentParams:
 
 @dataclass
 class Mask:
+    mask_type: str = "full"
+    name: str = ""
+    enabled: bool = True
+    combine_mode: str = "add"
     image_path: Optional[str] = None
     invert: bool = False
     opacity: float = 1.0
     feather_radius: float = 0.0
+    start_x: float = 0.5
+    start_y: float = 0.0
+    end_x: float = 0.5
+    end_y: float = 0.5
+    center_x: float = 0.5
+    center_y: float = 0.5
+    radius_x: float = 0.35
+    radius_y: float = 0.35
+    rotation: float = 0.0
+    feather: float = 0.5
+    components: List["Mask"] = field(default_factory=list)
 
     def to_pil(self, size: tuple[int, int]) -> Image.Image:
-        if self.image_path:
-            image = Image.open(self.image_path).convert("L")
-            if image.size != size:
-                image = image.resize(size, Image.Resampling.LANCZOS)
+        if not self.enabled:
+            return Image.new("L", size, color=0)
+
+        if self.components:
+            image = self._render_components(size)
         else:
-            image = Image.new("L", size, color=255)
+            image = self._render_single_mask(size)
+
         if self.feather_radius > 0:
             image = image.filter(ImageFilter.GaussianBlur(radius=self.feather_radius))
         if self.invert:
@@ -314,14 +331,207 @@ class Mask:
             image = Image.fromarray(alpha.astype(np.uint8), mode="L")
         return image
 
+    def _render_components(self, size: tuple[int, int]) -> Image.Image:
+        width, height = size
+        alpha = np.zeros((height, width), dtype=np.float32)
+        for component in self.components:
+            component_alpha = np.asarray(component.to_pil(size), dtype=np.float32) / 255.0
+            combine_mode = (component.combine_mode or "add").lower()
+            if combine_mode == "subtract":
+                alpha *= 1.0 - component_alpha
+            elif combine_mode == "intersect":
+                alpha *= component_alpha
+            elif combine_mode == "replace":
+                alpha = component_alpha
+            else:
+                alpha = np.maximum(alpha, component_alpha)
+        return Image.fromarray((np.clip(alpha, 0.0, 1.0) * 255.0).astype(np.uint8), mode="L")
+
+    def _render_single_mask(self, size: tuple[int, int]) -> Image.Image:
+        mask_type = (self.mask_type or "full").lower()
+        if self.image_path and mask_type in {"full", "image", "bitmap"}:
+            image = Image.open(self.image_path).convert("L")
+            if image.size != size:
+                image = image.resize(size, Image.Resampling.LANCZOS)
+            return image
+        if mask_type in {"full", "all"}:
+            return Image.new("L", size, color=255)
+        if mask_type in {"linear", "linear_gradient"}:
+            return self._render_linear_gradient(size)
+        if mask_type in {"radial", "radial_gradient"}:
+            return self._render_radial_gradient(size)
+        return Image.new("L", size, color=0)
+
+    @staticmethod
+    def _normalized_mesh(size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+        width, height = size
+        x_coords = np.linspace(0.0, 1.0, num=max(1, width), dtype=np.float32)
+        y_coords = np.linspace(0.0, 1.0, num=max(1, height), dtype=np.float32)
+        return np.meshgrid(x_coords, y_coords)
+
+    def _render_linear_gradient(self, size: tuple[int, int]) -> Image.Image:
+        width, height = size
+        x_coords, y_coords = self._normalized_mesh(size)
+        x_pixels = x_coords * max(width - 1, 1)
+        y_pixels = y_coords * max(height - 1, 1)
+        start_x = _clamp(float(self.start_x), 0.0, 1.0)
+        start_y = _clamp(float(self.start_y), 0.0, 1.0)
+        end_x = _clamp(float(self.end_x), 0.0, 1.0)
+        end_y = _clamp(float(self.end_y), 0.0, 1.0)
+        start_px = start_x * max(width - 1, 1)
+        start_py = start_y * max(height - 1, 1)
+        end_px = end_x * max(width - 1, 1)
+        end_py = end_y * max(height - 1, 1)
+        dx = end_px - start_px
+        dy = end_py - start_py
+        denom = dx * dx + dy * dy
+        if denom < 1e-8:
+            alpha = np.ones_like(x_coords, dtype=np.float32)
+        else:
+            projection = ((x_pixels - start_px) * dx + (y_pixels - start_py) * dy) / denom
+            alpha = 1.0 - _smoothstep(0.0, 1.0, projection).astype(np.float32)
+        return Image.fromarray((np.clip(alpha, 0.0, 1.0) * 255.0).astype(np.uint8), mode="L")
+
+    def _render_radial_gradient(self, size: tuple[int, int]) -> Image.Image:
+        width, height = size
+        x_coords, y_coords = self._normalized_mesh(size)
+        center_x = _clamp(float(self.center_x), 0.0, 1.0)
+        center_y = _clamp(float(self.center_y), 0.0, 1.0)
+        radius_x = max(1e-4, _clamp(float(self.radius_x), 0.001, 2.0))
+        radius_y = max(1e-4, _clamp(float(self.radius_y), 0.001, 2.0))
+
+        angle = np.deg2rad(float(self.rotation))
+        cos_a = np.float32(np.cos(angle))
+        sin_a = np.float32(np.sin(angle))
+        dx = (x_coords - center_x) * max(width - 1, 1)
+        dy = (y_coords - center_y) * max(height - 1, 1)
+        rotated_x = dx * cos_a + dy * sin_a
+        rotated_y = -dx * sin_a + dy * cos_a
+        radius_px = radius_x * max(width - 1, 1)
+        radius_py = radius_y * max(height - 1, 1)
+        distance = np.sqrt((rotated_x / radius_px) ** 2 + (rotated_y / radius_py) ** 2)
+
+        feather = _clamp(float(self.feather), 0.0, 1.0)
+        if feather <= 1e-6:
+            alpha = (distance <= 1.0).astype(np.float32)
+        else:
+            alpha = 1.0 - _smoothstep(max(0.0, 1.0 - feather), 1.0, distance).astype(np.float32)
+        return Image.fromarray((np.clip(alpha, 0.0, 1.0) * 255.0).astype(np.uint8), mode="L")
+
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        data: Dict[str, Any] = {
+            "type": self.mask_type,
+            "name": self.name,
+            "enabled": self.enabled,
+            "combine_mode": self.combine_mode,
+            "invert": self.invert,
+            "opacity": self.opacity,
+            "feather_radius": self.feather_radius,
+        }
+        if self.image_path:
+            data["image_path"] = self.image_path
+        if self.mask_type in {"linear", "linear_gradient"}:
+            data["start"] = {"x": self.start_x, "y": self.start_y}
+            data["end"] = {"x": self.end_x, "y": self.end_y}
+            data["feather"] = self.feather
+        if self.mask_type in {"radial", "radial_gradient"}:
+            data["center"] = {"x": self.center_x, "y": self.center_y}
+            data["radius_x"] = self.radius_x
+            data["radius_y"] = self.radius_y
+            data["rotation"] = self.rotation
+            data["feather"] = self.feather
+        if self.components:
+            data["components"] = [component.to_dict() for component in self.components]
+        return data
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> Optional["Mask"]:
         if not data:
             return None
-        return cls(**data)
+        if isinstance(data, Mask):
+            return data
+        if not isinstance(data, dict):
+            return None
+
+        normalized = cls._normalize_payload(data)
+        components_data = normalized.pop("components", [])
+        mask = cls(**{key: value for key, value in normalized.items() if key in cls.__dataclass_fields__})
+        mask.components = [component for component in (cls.from_dict(item) for item in components_data) if component]
+        return mask
+
+    @classmethod
+    def _normalize_payload(cls, data: Dict[str, Any]) -> Dict[str, Any]:
+        aliases = {
+            "type": "mask_type",
+            "maskType": "mask_type",
+            "mask_type": "mask_type",
+            "kind": "mask_type",
+            "imagePath": "image_path",
+            "image_path": "image_path",
+            "combineMode": "combine_mode",
+            "combine_mode": "combine_mode",
+            "featherRadius": "feather_radius",
+            "feather_radius": "feather_radius",
+            "startX": "start_x",
+            "start_x": "start_x",
+            "startY": "start_y",
+            "start_y": "start_y",
+            "endX": "end_x",
+            "end_x": "end_x",
+            "endY": "end_y",
+            "end_y": "end_y",
+            "centerX": "center_x",
+            "center_x": "center_x",
+            "centerY": "center_y",
+            "center_y": "center_y",
+            "radiusX": "radius_x",
+            "radius_x": "radius_x",
+            "radiusY": "radius_y",
+            "radius_y": "radius_y",
+            "rotation": "rotation",
+            "feather": "feather",
+            "opacity": "opacity",
+            "invert": "invert",
+            "enabled": "enabled",
+            "name": "name",
+        }
+        normalized: Dict[str, Any] = {}
+        for key, value in data.items():
+            canonical = aliases.get(key, key)
+            if canonical in {"components", "items", "masks", "regions"} and isinstance(value, list):
+                normalized["components"] = [item for item in value if isinstance(item, dict)]
+            elif canonical in {"start", "from"} and isinstance(value, dict):
+                normalized["start_x"] = value.get("x", value.get("left", normalized.get("start_x", 0.5)))
+                normalized["start_y"] = value.get("y", value.get("top", normalized.get("start_y", 0.0)))
+            elif canonical in {"end", "to"} and isinstance(value, dict):
+                normalized["end_x"] = value.get("x", value.get("left", normalized.get("end_x", 0.5)))
+                normalized["end_y"] = value.get("y", value.get("top", normalized.get("end_y", 0.5)))
+            elif canonical == "center" and isinstance(value, dict):
+                normalized["center_x"] = value.get("x", normalized.get("center_x", 0.5))
+                normalized["center_y"] = value.get("y", normalized.get("center_y", 0.5))
+            elif canonical in {"radius", "r"} and not isinstance(value, dict):
+                normalized["radius_x"] = value
+                normalized["radius_y"] = value
+            elif canonical == "radius" and isinstance(value, dict):
+                normalized["radius_x"] = value.get("x", value.get("width", normalized.get("radius_x", 0.35)))
+                normalized["radius_y"] = value.get("y", value.get("height", normalized.get("radius_y", 0.35)))
+            else:
+                normalized[canonical] = value
+
+        if "mask_type" not in normalized:
+            normalized["mask_type"] = "image" if normalized.get("image_path") else "full"
+        mask_type = str(normalized.get("mask_type", "full")).strip().lower().replace("-", "_")
+        type_aliases = {
+            "lineargradient": "linear",
+            "linear_gradient": "linear",
+            "gradient_linear": "linear",
+            "radialgradient": "radial",
+            "radial_gradient": "radial",
+            "gradient_radial": "radial",
+            "bitmap": "image",
+        }
+        normalized["mask_type"] = type_aliases.get(mask_type, mask_type)
+        return normalized
 
 
 def composite_images(base: Image.Image, layer: Image.Image, mode: BlendMode, opacity: float, mask: Optional[Mask]) -> Image.Image:
@@ -1405,18 +1615,105 @@ class AdjustmentMalayer(TabMalayer):
         return layer
 
 
-class MaskMalayer(TabMalayer):
+class MaskMalayer(AdjustmentMalayer):
     type_name = "mask"
     default_tab = EditorTab.MASK
     supported_tabs = (EditorTab.MASK, EditorTab.LAYERS)
 
+    def __init__(self, name: str = "Mask", *, params: Optional[AdjustmentParams] = None, **kwargs: Any) -> None:
+        super().__init__(name, params=params, **kwargs)
+
+    @classmethod
+    def supported_section_names(cls) -> tuple[str, ...]:
+        return tuple(section.value for section in AdjustmentSection)
+
+    def _sync_basic_to_pipeline(self) -> None:
+        self.params.tone.exposure = self.params.basic.exposure
+        self.params.tone.contrast = self.params.basic.contrast
+        self.params.hsl.hue = self.params.basic.hue
+        self.params.hsl.saturation = self.params.basic.saturation
+        self.params.hsl.vibrance = self.params.basic.vibrance
+
+    def update_section(self, section: str | AdjustmentSection, **values: Any) -> None:
+        AdjustmentMalayer.update_section(self, section, **values)
+
+    @classmethod
+    def _params_from_payload(cls, payload: Dict[str, Any]) -> AdjustmentParams:
+        raw_payload = payload or {}
+        if isinstance(raw_payload.get("adjust"), dict):
+            raw_payload = raw_payload["adjust"]
+        elif isinstance(raw_payload.get("adjustments"), dict):
+            raw_payload = raw_payload["adjustments"]
+
+        basic_payload = raw_payload.get("basic", {
+            "exposure": raw_payload.get("tone", {}).get("exposure", 0),
+            "contrast": raw_payload.get("tone", {}).get("contrast", 0),
+            "hue": raw_payload.get("hsl", {}).get("hue", 0),
+            "saturation": raw_payload.get("hsl", {}).get("saturation", 0),
+            "vibrance": raw_payload.get("hsl", {}).get("vibrance", 0),
+        })
+        curves_payload = raw_payload.get("curves", {})
+        hsl_payload = raw_payload.get("hsl", {})
+        white_balance_payload = raw_payload.get("white_balance", raw_payload.get("whiteBalance", {}))
+        color_editor_payload = raw_payload.get("color_editor", raw_payload.get("colorEditor", {}))
+        color_grading_payload = raw_payload.get("color_grading", raw_payload.get("colorGrading", {}))
+        return AdjustmentParams(
+            basic=BasicAdjustParams(**basic_payload),
+            white_balance=WhiteBalanceParams(**white_balance_payload),
+            geometry=GeometryParams(**raw_payload.get("geometry", {})),
+            tone=ToneParams(**raw_payload.get("tone", {})),
+            curves=CurveParams(
+                rgb_curve=[CurvePoint(**item) for item in curves_payload.get("rgb_curve", curves_payload.get("rgbCurve", [{"x": 0, "y": 0}, {"x": 255, "y": 255}]))],
+                luminosity_curve=[CurvePoint(**item) for item in curves_payload.get("luminosity_curve", curves_payload.get("luminosityCurve", [{"x": 0, "y": 0}, {"x": 255, "y": 255}]))],
+                red_curve=[CurvePoint(**item) for item in curves_payload.get("red_curve", curves_payload.get("redCurve", [{"x": 0, "y": 0}, {"x": 255, "y": 255}]))],
+                green_curve=[CurvePoint(**item) for item in curves_payload.get("green_curve", curves_payload.get("greenCurve", [{"x": 0, "y": 0}, {"x": 255, "y": 255}]))],
+                blue_curve=[CurvePoint(**item) for item in curves_payload.get("blue_curve", curves_payload.get("blueCurve", [{"x": 0, "y": 0}, {"x": 255, "y": 255}]))],
+            ),
+            hsl=HSLParams(
+                hue=hsl_payload.get("hue", basic_payload.get("hue", 0)),
+                saturation=hsl_payload.get("saturation", basic_payload.get("saturation", 0)),
+                vibrance=hsl_payload.get("vibrance", basic_payload.get("vibrance", 0)),
+                red=HSLColorParams(**hsl_payload.get("red", {})),
+                orange=HSLColorParams(**hsl_payload.get("orange", {})),
+                yellow=HSLColorParams(**hsl_payload.get("yellow", {})),
+                green=HSLColorParams(**hsl_payload.get("green", {})),
+                aqua=HSLColorParams(**hsl_payload.get("aqua", {})),
+                blue=HSLColorParams(**hsl_payload.get("blue", {})),
+                purple=HSLColorParams(**hsl_payload.get("purple", {})),
+                magenta=HSLColorParams(**hsl_payload.get("magenta", {})),
+            ),
+            color_editor=ColorEditorParams(**color_editor_payload),
+            color_grading=ColorGradingParams(**color_grading_payload),
+            detail=DetailParams(**raw_payload.get("detail", {})),
+            calibration=CalibrationParams(**raw_payload.get("calibration", {})),
+        )
+
     def apply(self, image: Image.Image, original_image: Optional[Image.Image] = None) -> Image.Image:
-        return image.copy()
+        result = _ensure_rgba(image)
+        result = AdjustmentMalayer._apply_white_balance(self, result)
+        result = AdjustmentMalayer._apply_calibration(self, result)
+        result = AdjustmentMalayer._apply_tone(self, result)
+        result = AdjustmentMalayer._apply_curves(self, result)
+        result = AdjustmentMalayer._apply_hsl(self, result)
+        result = AdjustmentMalayer._apply_color_editor(self, result)
+        result = AdjustmentMalayer._apply_color_grading(self, result)
+        result = AdjustmentMalayer._apply_detail(self, result)
+        return result
+
+    def render(self, image: Image.Image, original_image: Optional[Image.Image] = None) -> Image.Image:
+        if self.mask is None:
+            return _ensure_rgba(image)
+        return super().render(image, original_image=original_image)
+
+    def _serialize_payload(self) -> Dict[str, Any]:
+        return asdict(self.params)
 
     @classmethod
     def _from_dict(cls, data: Dict[str, Any]) -> "MaskMalayer":
+        payload = data.get("payload", {})
         return cls(
             name=data.get("name", "Mask"),
+            params=cls._params_from_payload(payload if isinstance(payload, dict) else {}),
             visible=data.get("visible", True),
             locked=data.get("locked", False),
             opacity=data.get("opacity", 1.0),

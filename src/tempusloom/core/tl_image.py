@@ -11,7 +11,7 @@ from PIL import Image
 from PIL.ExifTags import TAGS
 import numpy as np
 
-from .malayer import AdjustmentMalayer, BlendMode, EditorTab, Malayer, Mask, filter_malayers_by_tab
+from .malayer import AdjustmentMalayer, BlendMode, EditorTab, Malayer, Mask, MaskMalayer, filter_malayers_by_tab
 
 
 @dataclass
@@ -219,23 +219,66 @@ class TLImage:
         },
     }
     _MASK_KEY_ALIASES = {
+        "type": "type",
+        "maskType": "type",
+        "mask_type": "type",
+        "kind": "type",
+        "name": "name",
+        "enabled": "enabled",
+        "combineMode": "combine_mode",
+        "combine_mode": "combine_mode",
         "imagePath": "image_path",
         "image_path": "image_path",
         "invert": "invert",
         "opacity": "opacity",
         "featherRadius": "feather_radius",
         "feather_radius": "feather_radius",
+        "start": "start",
+        "from": "start",
+        "startX": "start_x",
+        "start_x": "start_x",
+        "startY": "start_y",
+        "start_y": "start_y",
+        "end": "end",
+        "to": "end",
+        "endX": "end_x",
+        "end_x": "end_x",
+        "endY": "end_y",
+        "end_y": "end_y",
+        "center": "center",
+        "centerX": "center_x",
+        "center_x": "center_x",
+        "centerY": "center_y",
+        "center_y": "center_y",
+        "radius": "radius",
+        "radiusX": "radius_x",
+        "radius_x": "radius_x",
+        "radiusY": "radius_y",
+        "radius_y": "radius_y",
+        "rotation": "rotation",
+        "feather": "feather",
+        "components": "components",
+        "items": "components",
+        "masks": "components",
+        "regions": "components",
     }
     _LAYER_KEY_ALIASES = {
         "id": "id",
+        "type": "type",
+        "layerType": "type",
+        "layer_type": "type",
         "name": "name",
         "visible": "visible",
+        "locked": "locked",
         "opacity": "opacity",
         "blendMode": "blend_mode",
         "blend_mode": "blend_mode",
         "tabId": "tab_id",
         "tab_id": "tab_id",
         "mask": "mask",
+        "payload": "payload",
+        "adjust": "adjust",
+        "adjustments": "adjustments",
     }
     _ADJUST_APPLY_ORDER = (
         "basic",
@@ -578,12 +621,125 @@ class TLImage:
 
     def update_mask(
         self,
-        values: Dict[str, Any],
+        values: Optional[Dict[str, Any]],
         *,
         record_history: bool = False,
         description: Optional[str] = None,
     ) -> None:
+        if values is None:
+            primary_adjustment = self._ensure_primary_adjustment_layer()
+            primary_adjustment.mask = None
+            self._sync_state_from_malayers()
+            if record_history:
+                self.commit_history(description or "清除蒙版")
+            return
         self.apply_json_payload({"mask": values}, record_history=record_history, description=description)
+
+    def preview_mask(self, values: Optional[Dict[str, Any]]) -> None:
+        if values is None:
+            primary_adjustment = self._ensure_primary_adjustment_layer()
+            primary_adjustment.mask = None
+            self._sync_state_from_malayers()
+            return
+        normalized = self._normalize_edit_state_payload({"mask": values})
+        self.edit_state = self._deep_merge_dict(self.edit_state, normalized)
+        primary_adjustment = self._ensure_primary_adjustment_layer()
+        primary_adjustment.mask = Mask.from_dict(self.edit_state.get("mask"))
+
+    def add_mask_layer(
+        self,
+        values: Optional[Dict[str, Any]],
+        *,
+        adjustment: Optional[Dict[str, Any]] = None,
+        name: Optional[str] = None,
+        index: Optional[int] = None,
+        record_history: bool = False,
+        description: Optional[str] = None,
+    ) -> MaskMalayer:
+        normalized_mask = self._normalize_mask_payload(values or {}) if values else {}
+        normalized_adjustment = self._normalize_adjust_payload(adjustment or {}) if adjustment else {}
+        layer = MaskMalayer(
+            name=name or self._mask_layer_name(normalized_mask),
+            mask=Mask.from_dict(normalized_mask),
+            tab_id=EditorTab.MASK.value,
+        )
+        if normalized_adjustment:
+            self._apply_adjust_delta(layer, normalized_adjustment)
+        safe_index = len(self.malayers) if index is None else max(0, min(index, len(self.malayers)))
+        self.malayers.insert(safe_index, layer)
+        self._sync_state_from_malayers()
+        if record_history:
+            self.commit_history(description or f"新增蒙版图层 · {layer.name}")
+        return layer
+
+    def update_mask_layer(
+        self,
+        layer_id: Optional[str],
+        values: Optional[Dict[str, Any]],
+        *,
+        adjustment: Optional[Dict[str, Any]] = None,
+        create_if_missing: bool = True,
+        record_history: bool = False,
+        description: Optional[str] = None,
+    ) -> Optional[MaskMalayer]:
+        layer = self._find_mask_layer(layer_id)
+        if layer is None:
+            if not create_if_missing or values is None:
+                return None
+            return self.add_mask_layer(
+                values,
+                adjustment=adjustment,
+                record_history=record_history,
+                description=description,
+            )
+        if values is None:
+            layer.mask = None
+        else:
+            normalized_mask = self._normalize_mask_payload(values)
+            layer.mask = Mask.from_dict(normalized_mask)
+            if not layer.name or layer.name == "Mask":
+                layer.name = self._mask_layer_name(normalized_mask)
+        if adjustment:
+            self._apply_adjust_delta(layer, self._normalize_adjust_payload(adjustment))
+        self._sync_state_from_malayers()
+        if record_history:
+            self.commit_history(description or f"更新蒙版图层 · {layer.name}")
+        return layer
+
+    def preview_mask_layer(
+        self,
+        layer_id: Optional[str],
+        values: Optional[Dict[str, Any]],
+        *,
+        adjustment: Optional[Dict[str, Any]] = None,
+        create_if_missing: bool = True,
+    ) -> Optional[MaskMalayer]:
+        layer = self._find_mask_layer(layer_id)
+        if layer is None:
+            if not create_if_missing or values is None:
+                return None
+            return self.add_mask_layer(values, adjustment=adjustment)
+        layer.mask = Mask.from_dict(self._normalize_mask_payload(values)) if values else None
+        if adjustment:
+            self._apply_adjust_delta(layer, self._normalize_adjust_payload(adjustment))
+        self._sync_state_from_malayers()
+        return layer
+
+    def preview_mask_layer_adjustment(
+        self,
+        layer_id: Optional[str],
+        section: str,
+        values: Dict[str, Any],
+    ) -> Optional[MaskMalayer]:
+        layer = self._find_mask_layer(layer_id)
+        if layer is None:
+            return None
+        self._apply_adjust_delta(layer, self._normalize_adjust_payload({section: values}))
+        self._sync_single_layer_state(layer)
+        return layer
+
+    def get_primary_mask_layer(self) -> Optional[MaskMalayer]:
+        return self._find_mask_layer(None)
 
     def update_layer_state(
         self,
@@ -706,17 +862,32 @@ class TLImage:
             "layers": [self._serialize_layer_state(layer) for layer in self.malayers],
         }
 
+    def _sync_single_layer_state(self, layer: Malayer) -> None:
+        layers_state = self.edit_state.get("layers")
+        if not isinstance(layers_state, list):
+            layers_state = [self._serialize_layer_state(item) for item in self.malayers]
+            self.edit_state["layers"] = layers_state
+            self.edit_state["image_path"] = self.image_path
+
+        serialized = self._serialize_layer_state(layer)
+        for index, layer_state in enumerate(layers_state):
+            if isinstance(layer_state, dict) and layer_state.get("id") == layer.id:
+                layers_state[index] = serialized
+                break
+        else:
+            layers_state.append(serialized)
+
     def _sync_malayers_from_edit_state(self) -> None:
         primary_adjustment = self._ensure_primary_adjustment_layer()
         adjust_state = self.edit_state.get("adjust", {})
         if isinstance(adjust_state, dict):
             self._apply_adjust_delta(primary_adjustment, adjust_state)
 
-        primary_adjustment.mask = Mask.from_dict(self.edit_state.get("mask"))
-
         layers_state = self.edit_state.get("layers")
         if isinstance(layers_state, list):
             self._apply_layers_state(layers_state)
+
+        primary_adjustment.mask = Mask.from_dict(self.edit_state.get("mask"))
 
     def _apply_edit_state_delta(self, normalized: Dict[str, Any]) -> None:
         primary_adjustment = self._ensure_primary_adjustment_layer()
@@ -725,11 +896,11 @@ class TLImage:
         if isinstance(adjust_state, dict):
             self._apply_adjust_delta(primary_adjustment, adjust_state)
 
-        if "mask" in normalized:
-            primary_adjustment.mask = Mask.from_dict(self.edit_state.get("mask"))
-
         if "layers" in normalized and isinstance(self.edit_state.get("layers"), list):
             self._apply_layers_state(self.edit_state.get("layers"))
+
+        if "mask" in normalized:
+            primary_adjustment.mask = Mask.from_dict(self.edit_state.get("mask"))
 
     def _apply_adjust_delta(self, primary_adjustment: AdjustmentMalayer, adjust_state: Dict[str, Any]) -> None:
         for section in self._ADJUST_APPLY_ORDER:
@@ -759,27 +930,121 @@ class TLImage:
         self.malayers.insert(0, layer)
         return layer
 
+    def _find_mask_layer(self, layer_id: Optional[str]) -> Optional[MaskMalayer]:
+        if layer_id:
+            layer = self.get_malayer(layer_id)
+            return layer if isinstance(layer, MaskMalayer) else None
+        return next((layer for layer in self.malayers if isinstance(layer, MaskMalayer)), None)
+
+    @staticmethod
+    def _mask_layer_name(mask_state: Dict[str, Any]) -> str:
+        mask_type = str(mask_state.get("type", mask_state.get("mask_type", ""))).lower()
+        if mask_type in {"linear", "linear_gradient"}:
+            return "Linear Gradient"
+        if mask_type in {"radial", "radial_gradient"}:
+            return "Radial Gradient"
+        return str(mask_state.get("name") or "Mask")
+
     def _apply_layers_state(self, layers_state: List[Dict[str, Any]]) -> None:
         for index, layer_state in enumerate(layers_state):
+            if not isinstance(layer_state, dict):
+                continue
             target = None
             layer_id = layer_state.get("id")
             if layer_id:
                 target = self.get_malayer(layer_id)
-            if target is None and 0 <= index < len(self.malayers):
+            if (
+                target is None
+                and not layer_id
+                and 0 <= index < len(self.malayers)
+                and self._layer_matches_state(self.malayers[index], layer_state)
+            ):
                 target = self.malayers[index]
             if target is None:
-                continue
-            if "visible" in layer_state:
-                target.visible = bool(layer_state["visible"])
-            if "opacity" in layer_state:
-                target.opacity = float(layer_state["opacity"])
-            if "blend_mode" in layer_state:
-                try:
-                    target.blend_mode = BlendMode(layer_state["blend_mode"])
-                except ValueError:
-                    pass
-            if "mask" in layer_state and layer_state["mask"] is not None:
-                target.mask = Mask.from_dict(layer_state["mask"])
+                target = self._create_malayer_from_layer_state(layer_state)
+                self.malayers.insert(max(0, min(index, len(self.malayers))), target)
+            else:
+                self._apply_layer_state_to_target(target, layer_state)
+
+    @classmethod
+    def _normalize_layer_type(cls, layer_type: Any) -> str:
+        normalized = str(layer_type or "adjustment").strip().lower().replace("-", "_")
+        aliases = {
+            "adjust": "adjustment",
+            "adjustments": "adjustment",
+            "adjustment_layer": "adjustment",
+            "mask_layer": "mask",
+            "mask_adjustment": "mask",
+            "filter_layer": "filter",
+        }
+        return aliases.get(normalized, normalized)
+
+    def _layer_matches_state(self, layer: Malayer, layer_state: Dict[str, Any]) -> bool:
+        if "type" not in layer_state:
+            return True
+        return layer.type_name == self._normalize_layer_type(layer_state.get("type"))
+
+    def _create_malayer_from_layer_state(self, layer_state: Dict[str, Any]) -> Malayer:
+        layer_dict = self._layer_state_to_malayer_dict(layer_state)
+        return Malayer.from_dict(layer_dict)
+
+    def _layer_state_to_malayer_dict(self, layer_state: Dict[str, Any]) -> Dict[str, Any]:
+        layer_type = self._normalize_layer_type(layer_state.get("type", "adjustment"))
+        payload = self._extract_layer_payload(layer_state)
+        return {
+            "id": layer_state.get("id"),
+            "type": layer_type,
+            "name": layer_state.get("name") or ("Mask" if layer_type == "mask" else "Adjustment"),
+            "visible": layer_state.get("visible", True),
+            "locked": layer_state.get("locked", False),
+            "opacity": layer_state.get("opacity", 1.0),
+            "blend_mode": layer_state.get("blend_mode", BlendMode.NORMAL.value),
+            "tab_id": layer_state.get("tab_id"),
+            "mask": layer_state.get("mask"),
+            "payload": payload,
+        }
+
+    def _apply_layer_state_to_target(self, target: Malayer, layer_state: Dict[str, Any]) -> None:
+        if "name" in layer_state:
+            target.name = str(layer_state["name"])
+        if "visible" in layer_state:
+            target.visible = bool(layer_state["visible"])
+        if "locked" in layer_state:
+            target.locked = bool(layer_state["locked"])
+        if "opacity" in layer_state:
+            target.opacity = float(layer_state["opacity"])
+        if "tab_id" in layer_state and layer_state["tab_id"] is not None:
+            target.tab_id = str(layer_state["tab_id"])
+        if "blend_mode" in layer_state:
+            try:
+                target.blend_mode = BlendMode(layer_state["blend_mode"])
+            except ValueError:
+                pass
+        if "mask" in layer_state and layer_state["mask"] is not None:
+            target.mask = Mask.from_dict(layer_state["mask"])
+        elif "mask" in layer_state and layer_state["mask"] is None:
+            target.mask = None
+
+        payload = self._extract_layer_payload(layer_state)
+        if payload and isinstance(target, AdjustmentMalayer):
+            self._apply_adjust_delta(target, payload)
+        elif payload and hasattr(target, "update_params"):
+            target.update_params(payload)
+
+    @classmethod
+    def _extract_layer_payload(cls, layer_state: Dict[str, Any]) -> Dict[str, Any]:
+        payload = layer_state.get("payload")
+        if isinstance(payload, dict):
+            if isinstance(payload.get("adjust"), dict):
+                return cls._normalize_adjust_payload(payload["adjust"])
+            if isinstance(payload.get("adjustments"), dict):
+                return cls._normalize_adjust_payload(payload["adjustments"])
+            return cls._normalize_adjust_payload(payload)
+        if isinstance(layer_state.get("adjust"), dict):
+            return cls._normalize_adjust_payload(layer_state["adjust"])
+        if isinstance(layer_state.get("adjustments"), dict):
+            return cls._normalize_adjust_payload(layer_state["adjustments"])
+        return {}
 
     def _serialize_layer_state(self, layer: Malayer) -> Dict[str, Any]:
         return {
@@ -787,10 +1052,12 @@ class TLImage:
             "name": layer.name,
             "type": layer.type_name,
             "visible": layer.visible,
+            "locked": layer.locked,
             "opacity": layer.opacity,
             "blend_mode": layer.blend_mode.value,
             "tab_id": layer.tab_id,
             "mask": layer.mask.to_dict() if layer.mask else None,
+            "payload": layer.to_dict().get("payload", {}),
         }
 
     def _build_mask_state(self, mask: Optional[Mask]) -> Dict[str, Any]:
@@ -901,7 +1168,14 @@ class TLImage:
         normalized: Dict[str, Any] = {}
         for key, value in mask_payload.items():
             canonical_key = cls._MASK_KEY_ALIASES.get(key, key)
-            normalized[canonical_key] = deepcopy(value)
+            if canonical_key == "components" and isinstance(value, list):
+                normalized[canonical_key] = [
+                    cls._normalize_mask_payload(item) for item in value if isinstance(item, dict)
+                ]
+            elif canonical_key in {"start", "end", "center", "radius"} and isinstance(value, dict):
+                normalized[canonical_key] = cls._normalize_nested_mapping(value)
+            else:
+                normalized[canonical_key] = deepcopy(value)
         return normalized
 
     @classmethod
@@ -911,6 +1185,10 @@ class TLImage:
             canonical_key = cls._LAYER_KEY_ALIASES.get(key, key)
             if canonical_key == "mask" and isinstance(value, dict):
                 normalized[canonical_key] = cls._normalize_mask_payload(value)
+            elif canonical_key in {"adjust", "adjustments"} and isinstance(value, dict):
+                normalized[canonical_key] = cls._normalize_adjust_payload(value)
+            elif canonical_key == "payload" and isinstance(value, dict):
+                normalized[canonical_key] = cls._normalize_layer_payload(value)
             else:
                 normalized[canonical_key] = deepcopy(value)
         return normalized
@@ -978,9 +1256,29 @@ class TLImage:
     def _export_mask_state(cls, mask_state: Dict[str, Any]) -> Dict[str, Any]:
         key_names = {
             "image_path": "imagePath",
+            "combine_mode": "combineMode",
             "feather_radius": "featherRadius",
+            "radius_x": "radiusX",
+            "radius_y": "radiusY",
+            "start_x": "startX",
+            "start_y": "startY",
+            "end_x": "endX",
+            "end_y": "endY",
+            "center_x": "centerX",
+            "center_y": "centerY",
         }
-        return {key_names.get(key, key): deepcopy(value) for key, value in mask_state.items()}
+        exported: Dict[str, Any] = {}
+        for key, value in mask_state.items():
+            export_key = key_names.get(key, key)
+            if key == "components" and isinstance(value, list):
+                exported[export_key] = [
+                    cls._export_mask_state(item) for item in value if isinstance(item, dict)
+                ]
+            elif isinstance(value, dict):
+                exported[export_key] = deepcopy(value)
+            else:
+                exported[export_key] = deepcopy(value)
+        return exported
 
     @classmethod
     def _export_layer_state(cls, layer_state: Dict[str, Any]) -> Dict[str, Any]:

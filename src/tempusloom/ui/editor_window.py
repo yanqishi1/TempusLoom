@@ -12,6 +12,7 @@ import json
 import os
 import math
 import multiprocessing as mp
+from copy import deepcopy
 from pathlib import Path
 from queue import Empty
 from typing import Any, Callable, Optional
@@ -33,8 +34,9 @@ from PyQt6.QtWidgets import (
 )
 
 from .editor_icons import icon_pixmap
+from PIL import Image
 from PIL.ImageQt import ImageQt
-from tempusloom.core import TLImage
+from tempusloom.core import Mask, TLImage
 from tempusloom.core.histogram_process import histogram_worker_main
 from tempusloom.agent import (
     AgentModelConfig,
@@ -510,6 +512,11 @@ class ToolSidebar(QWidget):
             else:
                 btn.setChecked(True)
             return
+        self._active_name = name
+        for btn in self._buttons:
+            if btn.isChecked():
+                btn.setChecked(False)
+        self.tool_changed.emit(name)
 
     @property
     def active_tool(self) -> str:
@@ -622,8 +629,11 @@ class ToolOptionsBar(QWidget):
             "wand-2":        "魔棒",
             "stamp":         "图章",
         }
+        _NAMES["mask-linear"] = "Linear Mask"
+        _NAMES["mask-radial"] = "Radial Mask"
         label = _NAMES.get(tool_name, tool_name)
-        self._tool_icon_lbl.setPixmap(icon_pixmap(tool_name, 12, C_PRIMARY))
+        icon_name = "circle-dashed" if tool_name in {"mask-linear", "mask-radial"} else tool_name
+        self._tool_icon_lbl.setPixmap(icon_pixmap(icon_name, 12, C_PRIMARY))
         self._tool_name_lbl.setText(label)
 
     def set_zoom(self, pct: int) -> None:
@@ -647,9 +657,13 @@ class CanvasArea(QWidget):
     color_picked = pyqtSignal(QColor)
     crop_confirmed = pyqtSignal(float, float, float, float)  # left, top, right, bottom (ratios)
     crop_cancelled = pyqtSignal()
+    mask_preview_changed = pyqtSignal(dict)
+    mask_create_finished = pyqtSignal(dict, str)
+    mask_change_finished = pyqtSignal(dict, str)
 
     _MIN_ZOOM = 5
     _MAX_ZOOM = 800
+    _MASK_OVERLAY_MAX_DIMENSION = 640
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -677,6 +691,19 @@ class CanvasArea(QWidget):
         self._crop_handle_size = 8
         self._crop_active_handle: Optional[str] = None
         self._original_image_size: Optional[tuple[int, int]] = None
+
+        # gradient mask drawing state
+        self._mask_drawing = False
+        self._mask_drag_start = QPointF()
+        self._mask_drag_current = QPointF()
+        self._mask_overlay_state: dict[str, Any] = {}
+        self._mask_overlay_visible = True
+        self._mask_editing = False
+        self._mask_active_handle: Optional[str] = None
+        self._mask_edit_start_pos = QPointF()
+        self._mask_edit_start_payload: dict[str, Any] = {}
+        self._mask_overlay_cache_key: Optional[tuple[str, int, int]] = None
+        self._mask_overlay_cache_pixmap: Optional[QPixmap] = None
 
         # placeholder label
         self._placeholder = QLabel(
@@ -742,9 +769,15 @@ class CanvasArea(QWidget):
     def set_tool(self, tool_name: str) -> None:
         if self._active_tool == "crop" and tool_name != "crop":
             self._clear_crop_overlay()
+        if self._active_tool in {"mask-linear", "mask-radial"} and tool_name != self._active_tool:
+            self._mask_drawing = False
+            self._mask_editing = False
+            self._mask_active_handle = None
         self._active_tool = tool_name
         if tool_name == "crop":
             self._init_crop_tool()
+        if tool_name in {"mask-linear", "mask-radial"}:
+            self.set_mask_overlay_visible(True)
         self._refresh_cursor()
 
     def _refresh_cursor(self) -> None:
@@ -757,7 +790,25 @@ class CanvasArea(QWidget):
         if self._active_tool == "pipette" and self._display_pixmap() is not None:
             self.setCursor(Qt.CursorShape.CrossCursor)
             return
+        if self._active_tool in {"mask-linear", "mask-radial"} and self._display_pixmap() is not None:
+            self.setCursor(Qt.CursorShape.CrossCursor)
+            return
         self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def set_mask_overlay(self, mask_state: Optional[dict[str, Any]]) -> None:
+        self._mask_overlay_state = dict(mask_state or {})
+        self._invalidate_mask_overlay_cache()
+        self.update()
+
+    def set_mask_overlay_visible(self, visible: bool) -> None:
+        if self._mask_overlay_visible == visible:
+            return
+        self._mask_overlay_visible = visible
+        self.update()
+
+    def _invalidate_mask_overlay_cache(self) -> None:
+        self._mask_overlay_cache_key = None
+        self._mask_overlay_cache_pixmap = None
 
     # ── crop helpers ──────────────────────────────────────────────────────────
     def set_original_image_size(self, width: int, height: int) -> None:
@@ -1067,8 +1118,342 @@ class CanvasArea(QWidget):
             # crop overlay
             if self._active_tool == "crop" and self._crop_active and not self._crop_rect.isNull():
                 self._paint_crop_overlay(p, dest)
+            if self._mask_overlay_visible and (self._active_tool in {"mask-linear", "mask-radial"} or self._mask_overlay_state):
+                self._paint_mask_overlay(p, dest)
         p.end()
         self._position_crop_buttons()
+
+    def _mask_payload_from_drag(self) -> Optional[dict[str, Any]]:
+        rect = self._image_rect()
+        if rect is None or not rect.isValid():
+            return None
+        start_x, start_y = self._canvas_pos_to_crop_ratio(self._mask_drag_start)
+        end_x, end_y = self._canvas_pos_to_crop_ratio(self._mask_drag_current)
+
+        if self._active_tool == "mask-linear":
+            return {
+                "type": "linear",
+                "name": "Linear Gradient",
+                "start": {"x": start_x, "y": start_y},
+                "end": {"x": end_x, "y": end_y},
+                "opacity": 1.0,
+                "invert": False,
+            }
+
+        if self._active_tool == "mask-radial":
+            radius_x = max(0.01, abs(end_x - start_x))
+            radius_y = max(0.01, abs(end_y - start_y))
+            return {
+                "type": "radial",
+                "name": "Radial Gradient",
+                "center": {"x": start_x, "y": start_y},
+                "radiusX": radius_x,
+                "radiusY": radius_y,
+                "rotation": 0.0,
+                "feather": 0.6,
+                "opacity": 1.0,
+                "invert": False,
+            }
+        return None
+
+    def _mask_payload_description(self, payload: dict[str, Any]) -> str:
+        mask_type = str(payload.get("type", payload.get("mask_type", "mask"))).lower()
+        if mask_type == "linear":
+            return "蒙版 · 线性渐变"
+        if mask_type == "radial":
+            return "蒙版 · 径向渐变"
+        return "蒙版"
+
+    @staticmethod
+    def _mask_state_type(mask_state: dict[str, Any]) -> str:
+        return str(mask_state.get("type", mask_state.get("mask_type", ""))).lower().replace("_gradient", "")
+
+    @staticmethod
+    def _mask_state_point(mask_state: dict[str, Any], key: str, fallback_x: float, fallback_y: float) -> tuple[float, float]:
+        nested = mask_state.get(key)
+        if isinstance(nested, dict):
+            return float(nested.get("x", fallback_x)), float(nested.get("y", fallback_y))
+        return float(mask_state.get(f"{key}_x", mask_state.get(f"{key}X", fallback_x))), float(
+            mask_state.get(f"{key}_y", mask_state.get(f"{key}Y", fallback_y))
+        )
+
+    def _mask_canvas_point(self, image_rect: QRectF, x_ratio: float, y_ratio: float) -> QPointF:
+        return QPointF(
+            image_rect.left() + image_rect.width() * max(0.0, min(1.0, x_ratio)),
+            image_rect.top() + image_rect.height() * max(0.0, min(1.0, y_ratio)),
+        )
+
+    def _canvas_point_to_mask_ratio(self, image_rect: QRectF, pos: QPointF) -> tuple[float, float]:
+        rel_x = (pos.x() - image_rect.left()) / max(image_rect.width(), 1.0)
+        rel_y = (pos.y() - image_rect.top()) / max(image_rect.height(), 1.0)
+        return max(0.0, min(1.0, rel_x)), max(0.0, min(1.0, rel_y))
+
+    @staticmethod
+    def _point_distance(a: QPointF, b: QPointF) -> float:
+        return math.hypot(a.x() - b.x(), a.y() - b.y())
+
+    @classmethod
+    def _point_to_segment_distance(cls, point: QPointF, start: QPointF, end: QPointF) -> float:
+        dx = end.x() - start.x()
+        dy = end.y() - start.y()
+        denom = dx * dx + dy * dy
+        if denom <= 1e-6:
+            return cls._point_distance(point, start)
+        t = ((point.x() - start.x()) * dx + (point.y() - start.y()) * dy) / denom
+        t = max(0.0, min(1.0, t))
+        closest = QPointF(start.x() + dx * t, start.y() + dy * t)
+        return cls._point_distance(point, closest)
+
+    @staticmethod
+    def _rotate_point(x_value: float, y_value: float, angle_degrees: float) -> tuple[float, float]:
+        angle = math.radians(angle_degrees)
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+        return x_value * cos_a - y_value * sin_a, x_value * sin_a + y_value * cos_a
+
+    def _mask_handle_points(self, mask_state: dict[str, Any], image_rect: QRectF) -> dict[str, QPointF]:
+        mask_type = self._mask_state_type(mask_state)
+        if mask_type == "linear":
+            start = self._mask_state_point(mask_state, "start", 0.5, 0.0)
+            end = self._mask_state_point(mask_state, "end", 0.5, 0.5)
+            start_pt = self._mask_canvas_point(image_rect, *start)
+            end_pt = self._mask_canvas_point(image_rect, *end)
+            return {
+                "linear-start": start_pt,
+                "linear-end": end_pt,
+                "linear-move": QPointF((start_pt.x() + end_pt.x()) / 2.0, (start_pt.y() + end_pt.y()) / 2.0),
+            }
+        if mask_type == "radial":
+            center = self._mask_state_point(mask_state, "center", 0.5, 0.5)
+            center_pt = self._mask_canvas_point(image_rect, *center)
+            radius_x = float(mask_state.get("radiusX", mask_state.get("radius_x", 0.35))) * image_rect.width()
+            radius_y = float(mask_state.get("radiusY", mask_state.get("radius_y", 0.35))) * image_rect.height()
+            rotation = float(mask_state.get("rotation", 0.0))
+            x_dx, x_dy = self._rotate_point(radius_x, 0.0, rotation)
+            y_dx, y_dy = self._rotate_point(0.0, -radius_y, rotation)
+            rotate_dx, rotate_dy = self._rotate_point(radius_x + 28.0, 0.0, rotation)
+            return {
+                "radial-center": center_pt,
+                "radial-radius-x": QPointF(center_pt.x() + x_dx, center_pt.y() + x_dy),
+                "radial-radius-y": QPointF(center_pt.x() + y_dx, center_pt.y() + y_dy),
+                "radial-rotate": QPointF(center_pt.x() + rotate_dx, center_pt.y() + rotate_dy),
+            }
+        return {}
+
+    def _hit_test_mask_handle(self, pos: QPointF) -> Optional[str]:
+        image_rect = self._image_rect()
+        if image_rect is None or not image_rect.isValid() or not self._mask_overlay_state:
+            return None
+        mask_type = self._mask_state_type(self._mask_overlay_state)
+        handles = self._mask_handle_points(self._mask_overlay_state, image_rect)
+        hit_radius = 10.0
+        priority = (
+            "radial-rotate",
+            "radial-radius-x",
+            "radial-radius-y",
+            "radial-center",
+            "linear-start",
+            "linear-end",
+            "linear-move",
+        )
+        for handle_name in priority:
+            point = handles.get(handle_name)
+            if point is not None and self._point_distance(pos, point) <= hit_radius:
+                return handle_name
+
+        if mask_type == "linear":
+            start = handles.get("linear-start")
+            end = handles.get("linear-end")
+            if start is not None and end is not None and self._point_to_segment_distance(pos, start, end) <= hit_radius:
+                return "linear-move"
+        elif mask_type == "radial":
+            center = handles.get("radial-center")
+            if center is not None:
+                radius_x = max(1.0, float(self._mask_overlay_state.get("radiusX", self._mask_overlay_state.get("radius_x", 0.35))) * image_rect.width())
+                radius_y = max(1.0, float(self._mask_overlay_state.get("radiusY", self._mask_overlay_state.get("radius_y", 0.35))) * image_rect.height())
+                rotation = math.radians(-float(self._mask_overlay_state.get("rotation", 0.0)))
+                dx = pos.x() - center.x()
+                dy = pos.y() - center.y()
+                local_x = dx * math.cos(rotation) - dy * math.sin(rotation)
+                local_y = dx * math.sin(rotation) + dy * math.cos(rotation)
+                distance = math.sqrt((local_x / radius_x) ** 2 + (local_y / radius_y) ** 2)
+                if abs(distance - 1.0) <= 0.08:
+                    return "radial-radius-x" if abs(local_x / radius_x) >= abs(local_y / radius_y) else "radial-radius-y"
+                if distance < 1.0:
+                    return "radial-center"
+        return None
+
+    @staticmethod
+    def _cursor_for_mask_handle(handle: Optional[str]) -> Qt.CursorShape:
+        if handle is None:
+            return Qt.CursorShape.ArrowCursor
+        if handle.endswith("rotate"):
+            return Qt.CursorShape.CrossCursor
+        if handle.endswith("move") or handle.endswith("center"):
+            return Qt.CursorShape.SizeAllCursor
+        if handle.endswith("radius-x"):
+            return Qt.CursorShape.SizeHorCursor
+        if handle.endswith("radius-y"):
+            return Qt.CursorShape.SizeVerCursor
+        return Qt.CursorShape.CrossCursor
+
+    def _update_mask_payload_from_edit(self, current_pos: QPointF) -> Optional[dict[str, Any]]:
+        image_rect = self._image_rect()
+        if image_rect is None or not image_rect.isValid() or not self._mask_active_handle:
+            return None
+        payload = deepcopy(self._mask_edit_start_payload)
+        start_x, start_y = self._canvas_point_to_mask_ratio(image_rect, self._mask_edit_start_pos)
+        current_x, current_y = self._canvas_point_to_mask_ratio(image_rect, current_pos)
+        delta_x = current_x - start_x
+        delta_y = current_y - start_y
+
+        handle = self._mask_active_handle
+        if handle == "linear-start":
+            payload["start"] = {"x": current_x, "y": current_y}
+        elif handle == "linear-end":
+            payload["end"] = {"x": current_x, "y": current_y}
+        elif handle == "linear-move":
+            start = self._mask_state_point(self._mask_edit_start_payload, "start", 0.5, 0.0)
+            end = self._mask_state_point(self._mask_edit_start_payload, "end", 0.5, 0.5)
+            payload["start"] = {"x": max(0.0, min(1.0, start[0] + delta_x)), "y": max(0.0, min(1.0, start[1] + delta_y))}
+            payload["end"] = {"x": max(0.0, min(1.0, end[0] + delta_x)), "y": max(0.0, min(1.0, end[1] + delta_y))}
+        elif handle in {"radial-center", "radial-radius-x", "radial-radius-y", "radial-rotate"}:
+            center = self._mask_state_point(self._mask_edit_start_payload, "center", 0.5, 0.5)
+            center_pt = self._mask_canvas_point(image_rect, *center)
+            if handle == "radial-center":
+                payload["center"] = {"x": current_x, "y": current_y}
+            elif handle == "radial-rotate":
+                angle = math.degrees(math.atan2(current_pos.y() - center_pt.y(), current_pos.x() - center_pt.x()))
+                payload["rotation"] = angle
+            else:
+                rotation = math.radians(-float(self._mask_edit_start_payload.get("rotation", 0.0)))
+                dx = current_pos.x() - center_pt.x()
+                dy = current_pos.y() - center_pt.y()
+                local_x = dx * math.cos(rotation) - dy * math.sin(rotation)
+                local_y = dx * math.sin(rotation) + dy * math.cos(rotation)
+                if handle == "radial-radius-x":
+                    payload["radiusX"] = max(0.01, min(2.0, abs(local_x) / max(image_rect.width(), 1.0)))
+                else:
+                    payload["radiusY"] = max(0.01, min(2.0, abs(local_y) / max(image_rect.height(), 1.0)))
+        return payload
+
+    def _paint_mask_overlay(self, p: QPainter, image_rect: QRectF) -> None:
+        payload = self._mask_payload_from_drag() if self._mask_drawing else self._mask_overlay_state
+        if not payload or not image_rect.isValid():
+            return
+        mask_type = self._mask_state_type(payload)
+        self._paint_mask_influence_overlay(p, image_rect, payload)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setPen(QPen(QColor(255, 255, 255, 190), 1.2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+
+        if mask_type == "linear":
+            start = self._mask_state_point(payload, "start", 0.5, 0.0)
+            end = self._mask_state_point(payload, "end", 0.5, 0.5)
+            start_pt = self._mask_canvas_point(image_rect, *start)
+            end_pt = self._mask_canvas_point(image_rect, *end)
+            dx = end_pt.x() - start_pt.x()
+            dy = end_pt.y() - start_pt.y()
+            length = math.hypot(dx, dy)
+            p.drawLine(start_pt, end_pt)
+            if length > 1e-3:
+                nx = -dy / length
+                ny = dx / length
+                guide_len = max(image_rect.width(), image_rect.height())
+                for point, color in ((start_pt, QColor(255, 255, 255, 150)), (end_pt, QColor(C_PRIMARY_H))):
+                    p.setPen(QPen(color, 1.0))
+                    p.drawLine(
+                        QPointF(point.x() - nx * guide_len, point.y() - ny * guide_len),
+                        QPointF(point.x() + nx * guide_len, point.y() + ny * guide_len),
+                    )
+            p.setPen(QPen(QColor(C_PRIMARY_H), 1.5))
+            p.setBrush(QBrush(QColor(C_PRIMARY_H)))
+            p.drawEllipse(start_pt, 4, 4)
+            p.drawEllipse(end_pt, 4, 4)
+            midpoint = QPointF((start_pt.x() + end_pt.x()) / 2.0, (start_pt.y() + end_pt.y()) / 2.0)
+            p.setBrush(QBrush(QColor(255, 255, 255, 220)))
+            p.drawEllipse(midpoint, 3.5, 3.5)
+            return
+
+        if mask_type == "radial":
+            center = self._mask_state_point(payload, "center", 0.5, 0.5)
+            center_pt = self._mask_canvas_point(image_rect, *center)
+            radius_x = float(payload.get("radiusX", payload.get("radius_x", 0.35))) * image_rect.width()
+            radius_y = float(payload.get("radiusY", payload.get("radius_y", 0.35))) * image_rect.height()
+            rotation = float(payload.get("rotation", 0.0))
+            handles = self._mask_handle_points(payload, image_rect)
+            p.save()
+            p.translate(center_pt)
+            p.rotate(rotation)
+            p.setPen(QPen(QColor(255, 255, 255, 170), 1.2))
+            p.drawEllipse(QRectF(-radius_x, -radius_y, radius_x * 2.0, radius_y * 2.0))
+            p.setPen(QPen(QColor(C_PRIMARY_H), 1.4))
+            p.drawLine(QPointF(-radius_x, 0), QPointF(radius_x, 0))
+            p.drawLine(QPointF(0, -radius_y), QPointF(0, radius_y))
+            p.restore()
+            radius_x_pt = handles.get("radial-radius-x")
+            radius_y_pt = handles.get("radial-radius-y")
+            rotate_pt = handles.get("radial-rotate")
+            if radius_x_pt is not None:
+                p.setPen(QPen(QColor(C_PRIMARY_H), 1.4))
+                p.setBrush(QBrush(QColor(C_PRIMARY_H)))
+                p.drawEllipse(radius_x_pt, 4, 4)
+            if radius_y_pt is not None:
+                p.setPen(QPen(QColor(C_PRIMARY_H), 1.4))
+                p.setBrush(QBrush(QColor(C_PRIMARY_H)))
+                p.drawEllipse(radius_y_pt, 4, 4)
+            if rotate_pt is not None and radius_x_pt is not None:
+                p.setPen(QPen(QColor(255, 255, 255, 150), 1.0, Qt.PenStyle.DashLine))
+                p.drawLine(radius_x_pt, rotate_pt)
+                p.setPen(QPen(QColor(255, 255, 255, 210), 1.4))
+                p.setBrush(QBrush(QColor(255, 255, 255, 230)))
+                p.drawEllipse(rotate_pt, 4.5, 4.5)
+            p.setPen(QPen(QColor(C_PRIMARY_H), 1.5))
+            p.setBrush(QBrush(QColor(C_PRIMARY_H)))
+            p.drawEllipse(center_pt, 4, 4)
+
+    def _paint_mask_influence_overlay(self, p: QPainter, image_rect: QRectF, payload: dict[str, Any]) -> None:
+        mask = Mask.from_dict(payload)
+        if mask is None:
+            return
+        px = self._display_pixmap()
+        if px is not None and not px.isNull():
+            width, height = px.width(), px.height()
+        else:
+            width = max(1, int(round(image_rect.width())))
+            height = max(1, int(round(image_rect.height())))
+        if width <= 0 or height <= 0:
+            return
+        longest_edge = max(width, height)
+        if longest_edge > self._MASK_OVERLAY_MAX_DIMENSION:
+            scale = self._MASK_OVERLAY_MAX_DIMENSION / float(longest_edge)
+            width = max(1, int(round(width * scale)))
+            height = max(1, int(round(height * scale)))
+
+        try:
+            payload_key = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        except TypeError:
+            payload_key = repr(sorted(payload.items()))
+        cache_key = (payload_key, width, height)
+        if self._mask_overlay_cache_key == cache_key and self._mask_overlay_cache_pixmap is not None:
+            overlay_px = self._mask_overlay_cache_pixmap
+        else:
+            mask_alpha = mask.to_pil((width, height))
+            overlay_alpha = mask_alpha.point(lambda value: 0 if value <= 0 else min(150, int(value * 0.58)))
+            overlay = Image.new("RGBA", (width, height), (255, 36, 36, 0))
+            overlay.putalpha(overlay_alpha)
+            overlay_px = QPixmap.fromImage(ImageQt(overlay))
+            self._mask_overlay_cache_key = cache_key
+            self._mask_overlay_cache_pixmap = overlay_px
+        if overlay_px.isNull():
+            return
+
+        p.save()
+        clip = QPainterPath()
+        clip.addRoundedRect(image_rect, 4, 4)
+        p.setClipPath(clip)
+        p.drawPixmap(image_rect.toRect(), overlay_px)
+        p.restore()
 
     # ── crop overlay painting ──────────────────────────────────────────────────
     def _paint_crop_overlay(self, p: QPainter, image_rect: QRectF) -> None:
@@ -1207,6 +1592,24 @@ class CanvasArea(QWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:   # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position()
+            mask_handle = self._hit_test_mask_handle(pos)
+            if mask_handle is not None and self._active_tool != "crop":
+                self._mask_editing = True
+                self._mask_active_handle = mask_handle
+                self._mask_edit_start_pos = pos
+                self._mask_edit_start_payload = deepcopy(self._mask_overlay_state)
+                event.accept()
+                self.update()
+                return
+            if self._active_tool in {"mask-linear", "mask-radial"}:
+                img_rect = self._image_rect()
+                if img_rect and img_rect.contains(pos):
+                    self._mask_drawing = True
+                    self._mask_drag_start = pos
+                    self._mask_drag_current = pos
+                    event.accept()
+                    self.update()
+                    return
             if self._active_tool == "crop" and self._crop_active:
                 handle = self._hit_test_crop_handle(pos)
                 if handle:
@@ -1239,6 +1642,21 @@ class CanvasArea(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:    # noqa: N802
         pos = event.position()
+        if self._mask_editing:
+            payload = self._update_mask_payload_from_edit(pos)
+            if payload is not None:
+                self._mask_overlay_state = payload
+                self._invalidate_mask_overlay_cache()
+            self.update()
+            return
+        if self._mask_drawing and self._active_tool in {"mask-linear", "mask-radial"}:
+            self._mask_drag_current = pos
+            payload = self._mask_payload_from_drag()
+            if payload is not None:
+                self._mask_overlay_state = payload
+                self._invalidate_mask_overlay_cache()
+            self.update()
+            return
         if self._crop_drawing and self._active_tool == "crop":
             self._update_crop_rect_from_drag(pos)
             self.update()
@@ -1246,12 +1664,36 @@ class CanvasArea(QWidget):
         if self._active_tool == "crop" and self._crop_active and not self._crop_drawing:
             handle = self._hit_test_crop_handle(pos)
             self.setCursor(self._cursor_for_crop_handle(handle))
+        elif self._mask_overlay_state and self._active_tool != "crop":
+            self.setCursor(self._cursor_for_mask_handle(self._hit_test_mask_handle(pos)))
+        elif not self._panning:
+            self._refresh_cursor()
         if self._panning:
             delta = event.position() - self._pan_start
             self._offset = self._pan_offset_start + delta
             self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None: # noqa: N802
+        if self._mask_editing and event.button() == Qt.MouseButton.LeftButton:
+            payload = self._update_mask_payload_from_edit(event.position())
+            self._mask_editing = False
+            self._mask_active_handle = None
+            self._mask_edit_start_payload = {}
+            if payload is not None:
+                self._mask_overlay_state = payload
+                self.mask_change_finished.emit(payload, self._mask_payload_description(payload))
+            self._refresh_cursor()
+            self.update()
+            return
+        if self._mask_drawing and event.button() == Qt.MouseButton.LeftButton:
+            self._mask_drawing = False
+            self._mask_drag_current = event.position()
+            payload = self._mask_payload_from_drag()
+            if payload is not None:
+                self._mask_overlay_state = payload
+                self.mask_create_finished.emit(payload, self._mask_payload_description(payload))
+            self.update()
+            return
         if self._crop_drawing and event.button() == Qt.MouseButton.LeftButton:
             self._crop_drawing = False
             self._crop_active_handle = None
@@ -1843,7 +2285,7 @@ class LayerRow(QWidget):
         self._active     = active
         self._visible    = True
         self._locked     = locked
-        self.setFixedHeight(46)
+        self.setFixedHeight(38)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._build(name, layer_type, thumb_color, locked)
         self._update_style()
@@ -1851,8 +2293,8 @@ class LayerRow(QWidget):
     def _build(self, name: str, layer_type: str,
                thumb_color: str, locked: bool) -> None:
         lo = QHBoxLayout(self)
-        lo.setContentsMargins(10, 0, 10, 0)
-        lo.setSpacing(10)
+        lo.setContentsMargins(8, 0, 8, 0)
+        lo.setSpacing(8)
 
         # eye icon (16 × 16)
         self._eye_btn = QPushButton()
@@ -1866,10 +2308,10 @@ class LayerRow(QWidget):
         self._refresh_eye()
         lo.addWidget(self._eye_btn)
 
-        # thumbnail (34 × 34 square)
+        # thumbnail (28 × 28 square)
         self._thumb_lbl = QLabel()
-        self._thumb_lbl.setPixmap(_layer_thumb_pixmap(thumb_color, layer_type, 34))
-        self._thumb_lbl.setFixedSize(34, 34)
+        self._thumb_lbl.setPixmap(_layer_thumb_pixmap(thumb_color, layer_type, 28))
+        self._thumb_lbl.setFixedSize(28, 28)
         self._thumb_lbl.setStyleSheet(
             f"border-radius:4px; border:{'1px solid ' + C_PRIMARY if self._active else 'none'};"
         )
@@ -1880,10 +2322,10 @@ class LayerRow(QWidget):
         info_w.setStyleSheet("background:transparent;")
         info_lo = QVBoxLayout(info_w)
         info_lo.setContentsMargins(0, 0, 0, 0)
-        info_lo.setSpacing(2)
+        info_lo.setSpacing(0)
         n_color = C_WHITE if self._active else C_TEXT_1
-        self._name_lbl = _lbl(name, n_color, 13, QFont.Weight.Medium)
-        self._type_lbl = _lbl(layer_type, C_TEXT_3, 11)
+        self._name_lbl = _lbl(name, n_color, 12, QFont.Weight.Medium)
+        self._type_lbl = _lbl(layer_type, C_TEXT_3, 10)
         info_lo.addWidget(self._name_lbl)
         info_lo.addWidget(self._type_lbl)
         lo.addWidget(info_w, 1)
@@ -1911,17 +2353,20 @@ class LayerRow(QWidget):
         self._update_style()
         n_color = C_WHITE if active else C_TEXT_1
         self._name_lbl.setStyleSheet(
-            f"color:{n_color}; font-size:13px; font-weight:500; background:transparent;"
+            f"color:{n_color}; font-size:12px; font-weight:500; background:transparent;"
         )
         self._thumb_lbl.setStyleSheet(
             f"border-radius:4px; border:{'1px solid ' + C_PRIMARY if active else 'none'};"
         )
         self._refresh_eye()
 
+    def layer_index(self) -> int:
+        return self._index
+
     def _update_style(self) -> None:
         bg = C_BG_ACTIVE if self._active else "transparent"
         self.setStyleSheet(
-            f"LayerRow{{background:{bg}; border-radius:8px;}}"
+            f"LayerRow{{background:{bg}; border-radius:6px;}}"
             f"LayerRow:hover{{background:{'#1d3870' if self._active else '#2a2a2a'};}}"
         )
 
@@ -2929,6 +3374,11 @@ class RightPanel(QWidget):
     layer_opacity_change_finished = pyqtSignal(int, float)
     adjust_section_changed = pyqtSignal(str, dict)
     adjust_section_change_finished = pyqtSignal(str, dict, str)
+    mask_changed = pyqtSignal(dict)
+    mask_change_finished = pyqtSignal(dict, str)
+    mask_adjust_section_changed = pyqtSignal(str, dict)
+    mask_adjust_section_change_finished = pyqtSignal(str, dict, str)
+    mask_layer_selected = pyqtSignal(str)
     tool_requested = pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
@@ -2946,19 +3396,45 @@ class RightPanel(QWidget):
         self._adjust_slider_meta: dict[GradientSlider, dict[str, Any]] = {}
         self._adjust_value_labels: dict[GradientSlider, QLabel] = {}
         self._curve_editors: dict[str, CurveEditor] = {}
+        self._curve_editors_by_scope: dict[str, dict[str, CurveEditor]] = {}
+        self._curve_btns_by_scope: dict[str, list[QPushButton]] = {}
         self._curve_editor_meta: dict[CurveEditor, dict[str, str]] = {}
         self._syncing_adjust_controls = False
+        self._adjust_build_scope = "adjust"
         self._color_editor_wheel: Optional[ColorEditorWheelWidget] = None
+        self._color_editor_wheels: dict[str, ColorEditorWheelWidget] = {}
         self._color_grading_wheels: dict[str, ColorWheelWidget] = {}
+        self._color_grading_wheels_by_scope: dict[str, dict[str, ColorWheelWidget]] = {}
         self._color_grading_luminance_sliders: dict[str, ThinSlider] = {}
+        self._color_grading_luminance_sliders_by_scope: dict[str, dict[str, ThinSlider]] = {}
         self._color_editor_preview: Optional[ColorEditorPreviewStrip] = None
+        self._color_editor_previews: dict[str, ColorEditorPreviewStrip] = {}
         self._color_editor_input_hsl_label: Optional[QLabel] = None
+        self._color_editor_input_hsl_labels: dict[str, QLabel] = {}
         self._color_editor_output_hsl_label: Optional[QLabel] = None
+        self._color_editor_output_hsl_labels: dict[str, QLabel] = {}
         self._color_editor_lightness_slider: Optional[ThinSlider] = None
+        self._color_editor_lightness_sliders: dict[str, ThinSlider] = {}
         self._color_editor_lightness_label: Optional[QLabel] = None
+        self._color_editor_lightness_labels: dict[str, QLabel] = {}
+        self._hsl_btns_by_scope: dict[str, dict[str, QPushButton]] = {}
+        self._hsl_slider_groups_by_scope: dict[str, dict[str, QWidget]] = {}
         self._histogram_canvas: Optional[_HistogramCanvas] = None
         self._histogram_meta_labels: list[QLabel] = []
         self._histogram_format_badge: Optional[QLabel] = None
+        self._mask_state: dict[str, Any] = {}
+        self._syncing_mask_controls = False
+        self._mask_tool_buttons: dict[str, QPushButton] = {}
+        self._mask_invert_btn: Optional[QPushButton] = None
+        self._mask_opacity_slider: Optional[QSlider] = None
+        self._mask_feather_slider: Optional[QSlider] = None
+        self._mask_opacity_label: Optional[QLabel] = None
+        self._mask_feather_label: Optional[QLabel] = None
+        self._mask_summary_label: Optional[QLabel] = None
+        self._mask_layers: list = []
+        self._active_mask_layer_id: Optional[str] = None
+        self._mask_layer_list_lo: Optional[QVBoxLayout] = None
+        self._mask_layer_buttons: dict[str, QPushButton] = {}
         self._build()
 
     def _build(self) -> None:
@@ -3137,7 +3613,8 @@ class RightPanel(QWidget):
         layer_list_w = QWidget()
         layer_list_lo = QVBoxLayout(layer_list_w)
         layer_list_lo.setContentsMargins(0, 0, 0, 0)
-        layer_list_lo.setSpacing(2)
+        layer_list_lo.setSpacing(0)
+        layer_list_lo.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._layer_list_lo = layer_list_lo
         self.set_malayers([])
 
@@ -3155,8 +3632,8 @@ class RightPanel(QWidget):
         self.layer_opacity_change_finished.emit(self._active_layer, self._opacity_slider.value() / 100.0)
 
     def _on_layer_selected(self, idx: int) -> None:
-        for i, row in enumerate(self._layer_rows):
-            row.set_active(i == idx)
+        for row in self._layer_rows:
+            row.set_active(row.layer_index() == idx)
         self._active_layer = idx
         if 0 <= idx < len(self._malayers):
             self._opacity_slider.blockSignals(True)
@@ -3188,22 +3665,91 @@ class RightPanel(QWidget):
             self._opacity_slider.blockSignals(False)
             self._opacity_lbl.setText("100%")
             self._active_layer = 0
+            self.set_mask_layers([], self._active_mask_layer_id)
             return
 
-        for idx, malayer in enumerate(malayers):
+        top_layer_index = len(malayers) - 1
+        for idx in reversed(range(len(malayers))):
+            malayer = malayers[idx]
             layer_type = getattr(malayer, "tab_id", getattr(malayer, "type_name", "layer"))
-            row = LayerRow(idx, malayer.name, layer_type, "#404040", idx == 0, malayer.locked)
+            row = LayerRow(idx, malayer.name, layer_type, "#404040", idx == top_layer_index, malayer.locked)
             row._eye_btn.setChecked(malayer.visible)
             row.selected.connect(self._on_layer_selected)
             row.visibility_toggled.connect(self._on_layer_visibility)
             self._layer_rows.append(row)
             self._layer_list_lo.addWidget(row)
+        self._layer_list_lo.addStretch()
 
-        self._active_layer = 0
+        self._active_layer = top_layer_index
         self._opacity_slider.blockSignals(True)
-        self._opacity_slider.setValue(int(getattr(malayers[0], "opacity", 1.0) * 100))
+        self._opacity_slider.setValue(int(getattr(malayers[top_layer_index], "opacity", 1.0) * 100))
         self._opacity_slider.blockSignals(False)
         self._opacity_lbl.setText(f"{self._opacity_slider.value()}%")
+        self.set_mask_layers(malayers, self._active_mask_layer_id)
+
+    def set_mask_layers(self, mask_layers: list, active_layer_id: Optional[str] = None) -> None:
+        self._mask_layers = [
+            layer for layer in mask_layers
+            if getattr(layer, "type_name", "") == "mask"
+        ]
+        layer_ids = {getattr(layer, "id", None) for layer in self._mask_layers}
+        candidate_id = active_layer_id if active_layer_id is not None else self._active_mask_layer_id
+        self._active_mask_layer_id = (
+            candidate_id
+            if candidate_id in layer_ids
+            else getattr(self._mask_layers[-1], "id", None) if self._mask_layers else None
+        )
+        if self._mask_layer_list_lo is None:
+            return
+
+        while self._mask_layer_list_lo.count():
+            item = self._mask_layer_list_lo.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._mask_layer_buttons.clear()
+
+        if not self._mask_layers:
+            placeholder = _lbl("暂无蒙版。选择线性或径向工具后在画布拖拽创建。", C_TEXT_4, 11)
+            placeholder.setWordWrap(True)
+            self._mask_layer_list_lo.addWidget(placeholder)
+            return
+
+        for layer in reversed(self._mask_layers):
+            layer_id = str(getattr(layer, "id", ""))
+            if not layer_id:
+                continue
+            button = self._build_mask_layer_button(layer)
+            button.setChecked(layer_id == self._active_mask_layer_id)
+            button.clicked.connect(lambda _=False, current_id=layer_id: self._on_mask_layer_selected(current_id))
+            self._mask_layer_buttons[layer_id] = button
+            self._mask_layer_list_lo.addWidget(button)
+
+    def _build_mask_layer_button(self, layer: Any) -> QPushButton:
+        mask = getattr(layer, "mask", None)
+        mask_state = mask.to_dict() if mask is not None else {}
+        type_label = self._mask_type_label(mask_state)
+        opacity = int(round(float(mask_state.get("opacity", getattr(layer, "opacity", 1.0))) * 100))
+        name = str(getattr(layer, "name", "") or type_label or "Mask")
+        button = QPushButton(f"{name}\n{type_label} · {opacity}%")
+        button.setCheckable(True)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        button.setMinimumHeight(46)
+        button.setToolTip("列表顶部的蒙版最后渲染")
+        button.setStyleSheet(
+            f"QPushButton{{background:{C_BG_ITEM}; color:{C_TEXT_2}; border:1px solid transparent;"
+            f"border-radius:6px; padding:6px 9px; font-size:11px; text-align:left;}}"
+            f"QPushButton:hover{{background:#343434; color:{C_TEXT_1};}}"
+            f"QPushButton:checked{{background:{C_BG_ACTIVE}; color:{C_PRIMARY_H}; border-color:{C_PRIMARY};}}"
+        )
+        return button
+
+    def _on_mask_layer_selected(self, layer_id: str) -> None:
+        self._active_mask_layer_id = layer_id
+        for current_id, button in self._mask_layer_buttons.items():
+            button.setChecked(current_id == layer_id)
+        self.mask_layer_selected.emit(layer_id)
 
     def set_history_entries(self, entries: list[dict[str, Any]]) -> None:
         if self._history_list_lo is None:
@@ -3232,9 +3778,17 @@ class RightPanel(QWidget):
 
     def set_edit_state(self, edit_state: dict[str, Any]) -> None:
         adjust_state = edit_state.get("adjust", {}) if isinstance(edit_state, dict) else {}
+        self._set_adjust_controls_for_scope("adjust", adjust_state if isinstance(adjust_state, dict) else {})
+
+    def set_mask_adjust_state(self, adjust_state: Optional[dict[str, Any]]) -> None:
+        self._set_adjust_controls_for_scope("mask", adjust_state if isinstance(adjust_state, dict) else {})
+
+    def _set_adjust_controls_for_scope(self, scope: str, adjust_state: dict[str, Any]) -> None:
         self._syncing_adjust_controls = True
         try:
             for slider, meta in self._adjust_slider_meta.items():
+                if meta.get("scope", "adjust") != scope:
+                    continue
                 raw_value = self._read_nested_value(adjust_state, meta["state_path"])
                 if raw_value is None:
                     continue
@@ -3242,31 +3796,34 @@ class RightPanel(QWidget):
                 slider.setValue(int(round(slider_value)), emit_signal=False)
                 self._adjust_value_labels[slider].setText(str(int(round(slider.value()))))
             for editor, meta in self._curve_editor_meta.items():
+                if meta.get("scope", "adjust") != scope:
+                    continue
                 raw_value = self._read_nested_value(adjust_state, meta["state_path"])
                 editor.set_points(raw_value if raw_value is not None else [{"x": 0, "y": 0}, {"x": 255, "y": 255}])
             color_editor_state = adjust_state.get("color_editor", {}) if isinstance(adjust_state, dict) else {}
-            if self._color_editor_wheel is not None and isinstance(color_editor_state, dict):
-                self._color_editor_wheel.set_hs(
+            color_editor_wheel = self._color_editor_wheels.get(scope)
+            if color_editor_wheel is not None and isinstance(color_editor_state, dict):
+                color_editor_wheel.set_hs(
                     float(color_editor_state.get("hue", 0)),
                     float(color_editor_state.get("saturation", 0)),
                     emit_signal=False,
                 )
             color_grading_state = adjust_state.get("color_grading", {}) if isinstance(adjust_state, dict) else {}
             if isinstance(color_grading_state, dict):
-                for region, wheel in self._color_grading_wheels.items():
+                for region, wheel in self._color_grading_wheels_by_scope.get(scope, {}).items():
                     wheel.set_hs(
                         float(color_grading_state.get(f"{region}_hue", 0)),
                         float(color_grading_state.get(f"{region}_saturation", 0)),
                         emit_signal=False,
                     )
-                for region, slider in self._color_grading_luminance_sliders.items():
+                for region, slider in self._color_grading_luminance_sliders_by_scope.get(scope, {}).items():
                     slider.setValue(
                         int(round(float(color_grading_state.get(f"{region}_luminance", 0)))),
                         emit_signal=False,
                     )
         finally:
             self._syncing_adjust_controls = False
-        self._refresh_color_editor_labels()
+        self._refresh_color_editor_labels(scope)
 
     def set_histogram_data(self, histogram: Optional[dict[str, list[float]]]) -> None:
         if self._histogram_canvas is not None:
@@ -3298,6 +3855,7 @@ class RightPanel(QWidget):
         to_slider: Optional[Callable[[Any], float]] = None,
     ) -> None:
         self._adjust_slider_meta[slider] = {
+            "scope": self._adjust_build_scope,
             "section": section,
             "param_path": param_path,
             "state_path": state_path or f"{section}.{param_path}",
@@ -3324,7 +3882,12 @@ class RightPanel(QWidget):
         if meta is None:
             return
         payload = self._build_nested_payload(meta["param_path"], meta["to_model"](value))
-        if committed:
+        if meta.get("scope", "adjust") == "mask":
+            if committed:
+                self.mask_adjust_section_change_finished.emit(meta["section"], payload, meta["display_label"])
+            else:
+                self.mask_adjust_section_changed.emit(meta["section"], payload)
+        elif committed:
             self.adjust_section_change_finished.emit(meta["section"], payload, meta["display_label"])
         else:
             self.adjust_section_changed.emit(meta["section"], payload)
@@ -3336,7 +3899,12 @@ class RightPanel(QWidget):
         if meta is None:
             return
         payload = {meta["param_path"]: points}
-        if committed:
+        if meta.get("scope", "adjust") == "mask":
+            if committed:
+                self.mask_adjust_section_change_finished.emit("curves", payload, meta["display_label"])
+            else:
+                self.mask_adjust_section_changed.emit("curves", payload)
+        elif committed:
             self.adjust_section_change_finished.emit("curves", payload, meta["display_label"])
         else:
             self.adjust_section_changed.emit("curves", payload)
@@ -3444,7 +4012,13 @@ class RightPanel(QWidget):
         )
         return btn
 
-    def _add_mask_slider_row(self, parent_lo: QVBoxLayout, label: str, value: int) -> None:
+    def _add_mask_slider_row(
+        self,
+        parent_lo: QVBoxLayout,
+        label: str,
+        value: int,
+        callback: Optional[Callable[[int], None]] = None,
+    ) -> tuple[QSlider, QLabel]:
         row = QWidget()
         row_lo = QHBoxLayout(row)
         row_lo.setContentsMargins(0, 0, 0, 0)
@@ -3470,8 +4044,11 @@ class RightPanel(QWidget):
         value_lbl.setFixedWidth(24)
         value_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         slider.valueChanged.connect(lambda v, lb=value_lbl: lb.setText(str(v)))
+        if callback is not None:
+            slider.valueChanged.connect(callback)
         row_lo.addWidget(value_lbl)
         parent_lo.addWidget(row)
+        return slider, value_lbl
 
     def _build_mask_content(self) -> QWidget:
         scroll = QScrollArea()
@@ -3492,150 +4069,233 @@ class RightPanel(QWidget):
         lo.setContentsMargins(14, 14, 14, 16)
         lo.setSpacing(12)
 
-        lo.addWidget(self._mask_title("蒙板工具"))
+        lo.addWidget(self._mask_title("Mask Tools"))
+        lo.addWidget(self._mask_subtitle("Create linear or radial gradient masks by choosing a tool and dragging on the canvas."))
+
         tools = QWidget()
         tools_lo = QHBoxLayout(tools)
         tools_lo.setContentsMargins(0, 0, 0, 0)
         tools_lo.setSpacing(8)
-        for text, active in (("画笔", True), ("线性渐变", False), ("径向渐变", False), ("智能识别", False)):
-            tools_lo.addWidget(self._build_mask_tool_button(text, active=active))
+        tool_defs = (
+            ("linear", "Linear", "mask-linear", True),
+            ("radial", "Radial", "mask-radial", True),
+            ("brush", "Brush", "paintbrush", False),
+            ("ai", "AI", "wand-2", False),
+        )
+        for key, text, tool_name, enabled in tool_defs:
+            btn = self._build_mask_tool_button(text, active=False)
+            btn.setEnabled(enabled)
+            btn.setToolTip("Reserved for a later phase" if not enabled else "Drag on the canvas to create")
+            if enabled:
+                btn.clicked.connect(lambda _=False, k=key, t=tool_name: self._select_mask_tool(k, t))
+            self._mask_tool_buttons[key] = btn
+            tools_lo.addWidget(btn)
         lo.addWidget(tools)
 
         lo.addWidget(_hline())
-        lo.addWidget(self._mask_title("智能识别"))
-        lo.addWidget(self._mask_subtitle("点击选择要识别的区域"))
-
-        lo.addWidget(_lbl("场景", C_TEXT_2, 12, QFont.Weight.Medium))
-        scene_row = QWidget()
-        scene_lo = QHBoxLayout(scene_row)
-        scene_lo.setContentsMargins(0, 0, 0, 0)
-        scene_lo.setSpacing(8)
-        for text, active in (("背景", False), ("天空", False), ("建筑", False)):
-            scene_lo.addWidget(self._build_mask_chip(text, active=active))
-        scene_lo.addStretch()
-        lo.addWidget(scene_row)
-
-        lo.addWidget(_lbl("生物", C_TEXT_2, 12, QFont.Weight.Medium))
-        bio_row = QWidget()
-        bio_lo = QHBoxLayout(bio_row)
-        bio_lo.setContentsMargins(0, 0, 0, 0)
-        bio_lo.setSpacing(8)
-        for text, active in (("人物", True), ("鸟", False), ("动物", False)):
-            bio_lo.addWidget(self._build_mask_chip(text, active=active))
-        bio_lo.addStretch()
-        lo.addWidget(bio_row)
-
-        person_box = QFrame()
-        person_box.setStyleSheet(f"background:{C_BG_ITEM}; border-radius:8px;")
-        person_lo = QVBoxLayout(person_box)
-        person_lo.setContentsMargins(10, 10, 10, 10)
-        person_lo.setSpacing(8)
-        person_lo.addWidget(_lbl("人物细分", C_TEXT_3, 11))
-
-        fine_row1 = QWidget()
-        fine_row1_lo = QHBoxLayout(fine_row1)
-        fine_row1_lo.setContentsMargins(0, 0, 0, 0)
-        fine_row1_lo.setSpacing(8)
-        for text, active in (("全身", True), ("皮肤", False), ("衣服", False)):
-            fine_row1_lo.addWidget(self._build_mask_chip(text, active=active))
-        fine_row1_lo.addStretch()
-        person_lo.addWidget(fine_row1)
-
-        fine_row2 = QWidget()
-        fine_row2_lo = QHBoxLayout(fine_row2)
-        fine_row2_lo.setContentsMargins(0, 0, 0, 0)
-        fine_row2_lo.setSpacing(8)
-        for text in ("面部皮肤", "身体皮肤", "头发", "眼睛", "嘴唇"):
-            fine_row2_lo.addWidget(self._build_mask_chip(text))
-        person_lo.addWidget(fine_row2)
-        lo.addWidget(person_box)
+        lo.addWidget(self._mask_title("蒙版列表"))
+        lo.addWidget(self._mask_subtitle("顶部蒙版最后渲染，底部蒙版最先渲染。点击条目切换当前编辑蒙版。"))
+        mask_list = QWidget()
+        mask_list_lo = QVBoxLayout(mask_list)
+        mask_list_lo.setContentsMargins(0, 0, 0, 0)
+        mask_list_lo.setSpacing(6)
+        self._mask_layer_list_lo = mask_list_lo
+        self.set_mask_layers(self._mask_layers, self._active_mask_layer_id)
+        lo.addWidget(mask_list)
 
         lo.addWidget(_hline())
-        lo.addWidget(self._mask_title("画笔设置"))
-        self._add_mask_slider_row(lo, "大小", 50)
-        self._add_mask_slider_row(lo, "羽化", 20)
-        self._add_mask_slider_row(lo, "流量", 75)
-        self._add_mask_slider_row(lo, "不透明", 100)
+        lo.addWidget(self._mask_title("Current Mask"))
+        self._mask_summary_label = self._mask_subtitle("No mask yet. You can also pass JSON with a mask field.")
+        lo.addWidget(self._mask_summary_label)
 
-        header_row = QWidget()
-        header_lo = QHBoxLayout(header_row)
-        header_lo.setContentsMargins(0, 0, 0, 0)
-        header_lo.setSpacing(8)
-        header_lo.addWidget(self._mask_title("已创建蒙板"))
-        header_lo.addStretch()
-        header_lo.addWidget(_lbl("3", C_TEXT_3, 12))
-        lo.addWidget(header_row)
-
-        for text, active in (("画笔蒙板 1", True), ("人物-全身", False), ("径向渐变 1", False)):
-            item = QPushButton(text)
-            item.setCursor(Qt.CursorShape.PointingHandCursor)
-            item.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            item.setFixedHeight(36)
-            item.setStyleSheet(
-                f"QPushButton{{text-align:left; padding:0 14px; border-radius:8px;"
-                f"background:{C_BG_ACTIVE if active else C_BG_RIGHT};"
-                f"color:{C_PRIMARY_H if active else C_TEXT_2}; border:1px solid "
-                f"{C_PRIMARY if active else C_BORDER}; font-size:12px;}}"
-                f"QPushButton:hover{{border-color:{C_PRIMARY if active else '#4a4a4a'};}}"
-            )
-            lo.addWidget(item)
+        param_box = QFrame()
+        param_box.setStyleSheet(f"background:{C_BG_ITEM}; border-radius:8px;")
+        param_lo = QVBoxLayout(param_box)
+        param_lo.setContentsMargins(10, 10, 10, 10)
+        param_lo.setSpacing(8)
+        self._mask_opacity_slider, self._mask_opacity_label = self._add_mask_slider_row(
+            param_lo, "Opacity", 100, callback=self._on_mask_opacity_changed
+        )
+        self._mask_opacity_slider.sliderReleased.connect(lambda: self._commit_current_mask("Mask opacity"))
+        self._mask_feather_slider, self._mask_feather_label = self._add_mask_slider_row(
+            param_lo, "Feather", 60, callback=self._on_mask_feather_changed
+        )
+        self._mask_feather_slider.sliderReleased.connect(lambda: self._commit_current_mask("Mask feather"))
+        lo.addWidget(param_box)
 
         action_row = QWidget()
         action_lo = QHBoxLayout(action_row)
         action_lo.setContentsMargins(0, 4, 0, 0)
         action_lo.setSpacing(8)
 
-        add_btn = QPushButton("+ 新建蒙板")
-        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        add_btn.setFixedHeight(34)
-        add_btn.setStyleSheet(
-            f"QPushButton{{background:{C_PRIMARY}; color:#ffffff; border:none; border-radius:6px;"
-            f"padding:0 16px; font-size:12px; font-weight:500;}}"
-            f"QPushButton:hover{{background:{C_PRIMARY_H};}}"
-        )
-        action_lo.addWidget(add_btn, 1)
-
-        invert_btn = QPushButton("反选")
-        invert_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        invert_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        invert_btn.setFixedHeight(34)
-        invert_btn.setStyleSheet(
+        self._mask_invert_btn = QPushButton("Invert")
+        self._mask_invert_btn.setCheckable(True)
+        self._mask_invert_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._mask_invert_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._mask_invert_btn.setFixedHeight(34)
+        self._mask_invert_btn.setStyleSheet(
             f"QPushButton{{background:transparent; color:{C_TEXT_2}; border:1px solid {C_BORDER};"
             f"border-radius:6px; padding:0 14px; font-size:12px;}}"
             f"QPushButton:hover{{border-color:#4a4a4a; color:{C_TEXT_1};}}"
+            f"QPushButton:checked{{background:{C_BG_ACTIVE}; color:{C_PRIMARY_H}; border-color:{C_PRIMARY};}}"
         )
-        action_lo.addWidget(invert_btn)
+        self._mask_invert_btn.clicked.connect(self._on_mask_invert_toggled)
+        action_lo.addWidget(self._mask_invert_btn)
 
-        delete_btn = QPushButton("删除")
-        delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        delete_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        delete_btn.setFixedHeight(34)
-        delete_btn.setStyleSheet(
+        clear_btn = QPushButton("Clear")
+        clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        clear_btn.setFixedHeight(34)
+        clear_btn.setStyleSheet(
             f"QPushButton{{background:transparent; color:#d66; border:1px solid {C_BORDER};"
             f"border-radius:6px; padding:0 14px; font-size:12px;}}"
             f"QPushButton:hover{{border-color:#6a3a3a; background:#2a1f1f;}}"
         )
-        action_lo.addWidget(delete_btn)
+        clear_btn.clicked.connect(self._clear_mask)
+        action_lo.addWidget(clear_btn)
+        action_lo.addStretch()
         lo.addWidget(action_row)
+
+        lo.addWidget(_hline())
+        lo.addWidget(self._mask_title("蒙版调色"))
+        self._build_mask_adjust_content(lo)
 
         note_box = QFrame()
         note_box.setStyleSheet(f"background:{C_BG_ITEM}; border-radius:8px;")
         note_lo = QVBoxLayout(note_box)
         note_lo.setContentsMargins(10, 10, 10, 10)
         note_lo.setSpacing(4)
-        note_lo.addWidget(_lbl("蒙板使用说明", C_TEXT_2, 11, QFont.Weight.Medium))
-        for line in (
-            "• 画板相当于在图层中创建一个编辑范围",
-            "• 选中区域可使用【调整】中的所有功能",
-            "• 支持多个蒙板叠加编辑",
-        ):
-            note_lo.addWidget(_lbl(line, C_TEXT_4, 10))
+        note_lo.addWidget(_lbl("JSON API Example", C_TEXT_2, 11, QFont.Weight.Medium))
+        example = (
+            '{"mask":{"type":"linear","start":{"x":0.5,"y":0.0},'
+            '"end":{"x":0.5,"y":0.45},"opacity":1.0}}'
+        )
+        example_lbl = _lbl(example, C_TEXT_4, 10)
+        example_lbl.setWordWrap(True)
+        note_lo.addWidget(example_lbl)
+        note_lo.addWidget(_lbl("Brush and AI mask entries are reserved for future phases.", C_TEXT_4, 10))
         lo.addWidget(note_box)
 
         lo.addStretch()
         scroll.setWidget(body)
         return scroll
+
+    def _build_mask_adjust_content(self, lo: QVBoxLayout) -> None:
+        old_scope = self._adjust_build_scope
+        self._adjust_build_scope = "mask"
+        try:
+            section_defs = [
+                ("白平衡", True, self._build_wb_content),
+                ("影调", False, self._build_tone_content),
+                ("曲线", False, self._build_curves_content),
+                ("HSL", False, self._build_hsl_content),
+                ("色彩编辑器", False, self._build_color_editor_content),
+                ("颜色分级", False, self._build_color_grading_content),
+            ]
+            for index, (title, expanded, builder) in enumerate(section_defs):
+                if index > 0:
+                    sep = QFrame()
+                    sep.setFrameShape(QFrame.Shape.HLine)
+                    sep.setFixedHeight(1)
+                    sep.setStyleSheet(f"background:{C_BORDER_P}; border:none;")
+                    lo.addWidget(sep)
+                section = AdjustSection(title, expanded=expanded)
+                builder(section.content_lo)
+                lo.addWidget(section)
+        finally:
+            self._adjust_build_scope = old_scope
+
+    def _select_mask_tool(self, key: str, tool_name: str) -> None:
+        for button_key, button in self._mask_tool_buttons.items():
+            button.setChecked(button_key == key)
+        self.tool_requested.emit(tool_name)
+
+    def _mask_type_label(self, mask_state: dict[str, Any]) -> str:
+        mask_type = str(mask_state.get("type", mask_state.get("mask_type", ""))).lower()
+        labels = {
+            "linear": "Linear Gradient",
+            "linear_gradient": "Linear Gradient",
+            "radial": "Radial Gradient",
+            "radial_gradient": "Radial Gradient",
+            "image": "Image Mask",
+            "full": "Full Mask",
+        }
+        return labels.get(mask_type, mask_type or "No Mask")
+
+    def set_mask_state(self, mask_state: Optional[dict[str, Any]]) -> None:
+        self._mask_state = dict(mask_state or {})
+        self._syncing_mask_controls = True
+        try:
+            opacity = int(round(float(self._mask_state.get("opacity", 1.0)) * 100)) if self._mask_state else 100
+            feather = int(round(float(self._mask_state.get("feather", 0.6)) * 100)) if self._mask_state else 60
+            invert = bool(self._mask_state.get("invert", False)) if self._mask_state else False
+            if self._mask_opacity_slider is not None:
+                self._mask_opacity_slider.setValue(max(0, min(100, opacity)))
+            if self._mask_feather_slider is not None:
+                self._mask_feather_slider.setValue(max(0, min(100, feather)))
+            if self._mask_invert_btn is not None:
+                self._mask_invert_btn.setChecked(invert)
+        finally:
+            self._syncing_mask_controls = False
+        self._refresh_mask_summary()
+
+    def _refresh_mask_summary(self) -> None:
+        if self._mask_summary_label is None:
+            return
+        if not self._mask_state:
+            self._mask_summary_label.setText("No mask yet. Create one from the canvas or pass JSON with a mask field.")
+            return
+        self._mask_summary_label.setText(
+            f"Current: {self._mask_type_label(self._mask_state)} · "
+            f"Opacity {int(round(float(self._mask_state.get('opacity', 1.0)) * 100))}% · "
+            f"Invert {'on' if self._mask_state.get('invert') else 'off'}"
+        )
+
+    def _update_mask_state(self, updates: dict[str, Any], *, committed: bool, description: str) -> None:
+        if self._syncing_mask_controls:
+            return
+        next_state = dict(self._mask_state)
+        next_state.update(updates)
+        self._mask_state = next_state
+        self._refresh_mask_summary()
+        if committed:
+            self.mask_change_finished.emit(next_state, description)
+        else:
+            self.mask_changed.emit(next_state)
+
+    def apply_mask_state(self, mask_state: dict[str, Any], *, committed: bool = False, description: str = "Mask") -> None:
+        self.set_mask_state(mask_state)
+        if committed:
+            self.mask_change_finished.emit(dict(self._mask_state), description)
+        else:
+            self.mask_changed.emit(dict(self._mask_state))
+
+    def _on_mask_opacity_changed(self, value: int) -> None:
+        self._update_mask_state(
+            {"opacity": max(0.0, min(1.0, value / 100.0))},
+            committed=False,
+            description="Mask opacity",
+        )
+
+    def _on_mask_feather_changed(self, value: int) -> None:
+        self._update_mask_state(
+            {"feather": max(0.0, min(1.0, value / 100.0))},
+            committed=False,
+            description="Mask feather",
+        )
+
+    def _commit_current_mask(self, description: str) -> None:
+        if self._syncing_mask_controls or not self._mask_state:
+            return
+        self.mask_change_finished.emit(dict(self._mask_state), description)
+
+    def _on_mask_invert_toggled(self, checked: bool) -> None:
+        self._update_mask_state({"invert": checked}, committed=True, description="Mask invert")
+
+    def _clear_mask(self) -> None:
+        self._mask_state = {}
+        self._refresh_mask_summary()
+        self.mask_change_finished.emit({}, "Clear mask")
 
     def _build_history_content(self) -> QWidget:
         scroll = QScrollArea()
@@ -3952,39 +4612,49 @@ class RightPanel(QWidget):
     def _format_color_editor_hsl(self, hue: float, saturation: int, lightness: int) -> str:
         return f"H:{int(round(hue)):03d}  S:{int(round(saturation)):02d}  L:{int(round(lightness)):03d}"
 
-    def _color_editor_state_value(self, key: str, default: int = 0) -> int:
+    def _color_editor_state_value(self, key: str, default: int = 0, scope: Optional[str] = None) -> int:
+        target_scope = scope or self._adjust_build_scope
         for slider, meta in self._adjust_slider_meta.items():
-            if meta.get("section") == "color_editor" and meta.get("param_path") == key:
+            if (
+                meta.get("scope", "adjust") == target_scope
+                and meta.get("section") == "color_editor"
+                and meta.get("param_path") == key
+            ):
                 try:
                     return int(round(slider.value()))
                 except Exception:
                     return default
         return default
 
-    def _refresh_color_editor_labels(self) -> None:
-        if self._color_editor_wheel is None:
+    def _refresh_color_editor_labels(self, scope: Optional[str] = None) -> None:
+        target_scope = scope or self._adjust_build_scope
+        color_editor_wheel = self._color_editor_wheels.get(target_scope)
+        if color_editor_wheel is None:
             return
-        hue = self._color_editor_wheel.hue()
-        saturation = int(round(self._color_editor_wheel.saturation()))
-        lightness = self._color_editor_state_value("lightness")
-        hue_shift = self._color_editor_state_value("hue_shift")
-        saturation_shift = self._color_editor_state_value("saturation_shift")
-        luminance_shift = self._color_editor_state_value("luminance_shift")
+        hue = color_editor_wheel.hue()
+        saturation = int(round(color_editor_wheel.saturation()))
+        lightness = self._color_editor_state_value("lightness", scope=target_scope)
+        hue_shift = self._color_editor_state_value("hue_shift", scope=target_scope)
+        saturation_shift = self._color_editor_state_value("saturation_shift", scope=target_scope)
+        luminance_shift = self._color_editor_state_value("luminance_shift", scope=target_scope)
 
         output_hue = (hue + hue_shift) % 360
         output_saturation = max(0, min(100, saturation + saturation_shift))
         output_lightness = max(-100, min(100, lightness + luminance_shift))
 
-        if self._color_editor_input_hsl_label is not None:
-            self._color_editor_input_hsl_label.setText(
+        input_label = self._color_editor_input_hsl_labels.get(target_scope)
+        output_label = self._color_editor_output_hsl_labels.get(target_scope)
+        if input_label is not None:
+            input_label.setText(
                 self._format_color_editor_hsl(hue, saturation, lightness)
             )
-        if self._color_editor_output_hsl_label is not None:
-            self._color_editor_output_hsl_label.setText(
+        if output_label is not None:
+            output_label.setText(
                 self._format_color_editor_hsl(output_hue, output_saturation, output_lightness)
             )
 
-        if self._color_editor_preview is not None:
+        preview = self._color_editor_previews.get(target_scope)
+        if preview is not None:
             input_color = QColor.fromHsl(
                 int(round(hue)) % 360,
                 int(round(saturation * 2.55)),
@@ -3995,22 +4665,29 @@ class RightPanel(QWidget):
                 int(round(output_saturation * 2.55)),
                 int(round((output_lightness + 100) / 200 * 255)),
             )
-            self._color_editor_preview.set_colors(input_color, output_color)
+            preview.set_colors(input_color, output_color)
 
-    def _emit_color_editor_wheel_change(self, hue: float, saturation: float, *, committed: bool) -> None:
-        self._refresh_color_editor_labels()
+    def _emit_color_editor_wheel_change(self, hue: float, saturation: float, *, committed: bool, scope: Optional[str] = None) -> None:
+        target_scope = scope or self._adjust_build_scope
+        self._refresh_color_editor_labels(target_scope)
         payload = {
             "hue": int(round(hue)) % 360,
             "saturation": int(round(saturation)),
         }
         if self._syncing_adjust_controls:
             return
-        if committed:
+        if target_scope == "mask":
+            if committed:
+                self.mask_adjust_section_change_finished.emit("color_editor", payload, "色彩编辑器 · 取样颜色")
+            else:
+                self.mask_adjust_section_changed.emit("color_editor", payload)
+        elif committed:
             self.adjust_section_change_finished.emit("color_editor", payload, "色彩编辑器 · 取样颜色")
         else:
             self.adjust_section_changed.emit("color_editor", payload)
 
     def apply_color_editor_sample(self, color: QColor, *, committed: bool = True) -> None:
+        target_scope = "mask" if self._active_tab == "蒙板" else "adjust"
         hue, saturation, lightness, _alpha = color.getHsl()
         hue_value = 0 if hue < 0 else int(hue)
         saturation_value = int(round((saturation / 255.0) * 100.0))
@@ -4018,27 +4695,36 @@ class RightPanel(QWidget):
 
         self._syncing_adjust_controls = True
         try:
-            if self._color_editor_wheel is not None:
-                self._color_editor_wheel.set_hs(hue_value, saturation_value, emit_signal=False)
-            if self._color_editor_lightness_slider is not None:
-                self._color_editor_lightness_slider.setValue(lightness_value, emit_signal=False)
-            if self._color_editor_lightness_label is not None:
-                self._color_editor_lightness_label.setText(str(lightness_value))
+            color_editor_wheel = self._color_editor_wheels.get(target_scope)
+            lightness_slider = self._color_editor_lightness_sliders.get(target_scope)
+            lightness_label = self._color_editor_lightness_labels.get(target_scope)
+            if color_editor_wheel is not None:
+                color_editor_wheel.set_hs(hue_value, saturation_value, emit_signal=False)
+            if lightness_slider is not None:
+                lightness_slider.setValue(lightness_value, emit_signal=False)
+            if lightness_label is not None:
+                lightness_label.setText(str(lightness_value))
         finally:
             self._syncing_adjust_controls = False
 
-        self._refresh_color_editor_labels()
+        self._refresh_color_editor_labels(target_scope)
         payload = {
             "hue": hue_value,
             "saturation": saturation_value,
             "lightness": lightness_value,
         }
-        if committed:
+        if target_scope == "mask":
+            if committed:
+                self.mask_adjust_section_change_finished.emit("color_editor", payload, "色彩编辑器 · 取样颜色")
+            else:
+                self.mask_adjust_section_changed.emit("color_editor", payload)
+        elif committed:
             self.adjust_section_change_finished.emit("color_editor", payload, "色彩编辑器 · 取样颜色")
         else:
             self.adjust_section_changed.emit("color_editor", payload)
 
     def _build_color_editor_content(self, lo: QVBoxLayout) -> None:
+        scope = self._adjust_build_scope
         pick_button = QPushButton("用吸管在照片中吸取颜色")
         pick_button.setIcon(_qicon("eyedropper", 14, C_TEXT_2))
         pick_button.setIconSize(QSize(14, 14))
@@ -4061,11 +4747,12 @@ class RightPanel(QWidget):
         wheel_lo.setSpacing(12)
 
         self._color_editor_wheel = ColorEditorWheelWidget(size=258)
+        self._color_editor_wheels[scope] = self._color_editor_wheel
         self._color_editor_wheel.color_changed.connect(
-            lambda hue, sat: self._emit_color_editor_wheel_change(hue, sat, committed=False)
+            lambda hue, sat, current_scope=scope: self._emit_color_editor_wheel_change(hue, sat, committed=False, scope=current_scope)
         )
         self._color_editor_wheel.color_change_finished.connect(
-            lambda hue, sat: self._emit_color_editor_wheel_change(hue, sat, committed=True)
+            lambda hue, sat, current_scope=scope: self._emit_color_editor_wheel_change(hue, sat, committed=True, scope=current_scope)
         )
         wheel_lo.addWidget(self._color_editor_wheel, 1)
 
@@ -4077,13 +4764,15 @@ class RightPanel(QWidget):
         lightness_label = _lbl("0", C_TEXT_4, 11)
         lightness_slider = ThinSlider(Qt.Orientation.Vertical, -100, 100, 0)
         lightness_slider.value_changed.connect(lambda v, lb=lightness_label: lb.setText(str(v)))
-        lightness_slider.value_changed.connect(lambda _v: self._refresh_color_editor_labels())
+        lightness_slider.value_changed.connect(lambda _v, current_scope=scope: self._refresh_color_editor_labels(current_scope))
         lightness_lo.addWidget(lightness_slider, 0, Qt.AlignmentFlag.AlignHCenter)
         lightness_lo.addWidget(lightness_label, 0, Qt.AlignmentFlag.AlignHCenter)
         lightness_lo.addStretch()
         wheel_lo.addWidget(lightness_col, 0, Qt.AlignmentFlag.AlignVCenter)
         self._color_editor_lightness_slider = lightness_slider
         self._color_editor_lightness_label = lightness_label
+        self._color_editor_lightness_sliders[scope] = lightness_slider
+        self._color_editor_lightness_labels[scope] = lightness_label
 
         self._register_adjust_slider(
             lightness_slider,
@@ -4096,6 +4785,7 @@ class RightPanel(QWidget):
         lo.addWidget(wheel_row)
 
         self._color_editor_preview = ColorEditorPreviewStrip()
+        self._color_editor_previews[scope] = self._color_editor_preview
         lo.addWidget(self._color_editor_preview)
 
         hsl_row = QWidget()
@@ -4104,6 +4794,8 @@ class RightPanel(QWidget):
         hsl_lo.setSpacing(0)
         self._color_editor_input_hsl_label = _lbl("H:---  S:--  L:---", C_TEXT_4, 11)
         self._color_editor_output_hsl_label = _lbl("H:---  S:--  L:---", C_TEXT_4, 11)
+        self._color_editor_input_hsl_labels[scope] = self._color_editor_input_hsl_label
+        self._color_editor_output_hsl_labels[scope] = self._color_editor_output_hsl_label
         hsl_lo.addWidget(self._color_editor_input_hsl_label)
         hsl_lo.addStretch()
         hsl_lo.addWidget(self._color_editor_output_hsl_label)
@@ -4167,7 +4859,7 @@ class RightPanel(QWidget):
             section="color_editor",
             param_path="hue_shift",
             display_label="色彩编辑器 · 色相偏移",
-            on_change=lambda _v: self._refresh_color_editor_labels(),
+            on_change=lambda _v, current_scope=scope: self._refresh_color_editor_labels(current_scope),
         )
         self._add_thin_slider_row(
             lo,
@@ -4176,7 +4868,7 @@ class RightPanel(QWidget):
             section="color_editor",
             param_path="saturation_shift",
             display_label="色彩编辑器 · 饱和度偏移",
-            on_change=lambda _v: self._refresh_color_editor_labels(),
+            on_change=lambda _v, current_scope=scope: self._refresh_color_editor_labels(current_scope),
         )
         self._add_thin_slider_row(
             lo,
@@ -4185,9 +4877,9 @@ class RightPanel(QWidget):
             section="color_editor",
             param_path="luminance_shift",
             display_label="色彩编辑器 · 明亮度偏移",
-            on_change=lambda _v: self._refresh_color_editor_labels(),
+            on_change=lambda _v, current_scope=scope: self._refresh_color_editor_labels(current_scope),
         )
-        self._refresh_color_editor_labels()
+        self._refresh_color_editor_labels(scope)
 
     # ── 影调 section ──────────────────────────────────────────────────────────
 
@@ -4229,6 +4921,7 @@ class RightPanel(QWidget):
 
     def _build_curves_content(self, lo: QVBoxLayout) -> None:
         """Curves section: Lightroom-style point curve for RGB/R/G/B."""
+        scope = self._adjust_build_scope
         btn_row = QWidget()
         btn_row.setStyleSheet("background:transparent;")
         btn_lo = QHBoxLayout(btn_row)
@@ -4242,6 +4935,8 @@ class RightPanel(QWidget):
             ("B", "#2c82ea", "blue_curve", False),
         ]
         self._curve_btns: list[QPushButton] = []
+        self._curve_btns_by_scope[scope] = self._curve_btns
+        self._curve_editors_by_scope[scope] = {}
 
         for ch_label, ch_color, _curve_key, active in _CH_CIRCLES:
             b = QPushButton()
@@ -4259,6 +4954,7 @@ class RightPanel(QWidget):
             )
             b._ch_label = ch_label   # type: ignore[attr-defined]
             b._ch_color = ch_color   # type: ignore[attr-defined]
+            b._adjust_scope = scope   # type: ignore[attr-defined]
             b.clicked.connect(lambda _, bn=b: self._on_curve_channel(bn))
             btn_lo.addWidget(b)
             self._curve_btns.append(b)
@@ -4272,7 +4968,9 @@ class RightPanel(QWidget):
             ed.curve_changed.connect(lambda points, editor=ed: self._emit_curve_change(editor, points, committed=False))
             ed.curve_change_finished.connect(lambda points, editor=ed: self._emit_curve_change(editor, points, committed=True))
             self._curve_editors[ch_label] = ed
+            self._curve_editors_by_scope[scope][ch_label] = ed
             self._curve_editor_meta[ed] = {
+                "scope": scope,
                 "param_path": curve_key,
                 "state_path": f"curves.{curve_key}",
                 "display_label": f"曲线 · {ch_label}",
@@ -4293,7 +4991,10 @@ class RightPanel(QWidget):
         lo.addWidget(label_row)
 
     def _on_curve_channel(self, clicked_btn: QPushButton) -> None:
-        for b in self._curve_btns:
+        scope = getattr(clicked_btn, "_adjust_scope", "adjust")
+        curve_btns = self._curve_btns_by_scope.get(scope, self._curve_btns)
+        curve_editors = self._curve_editors_by_scope.get(scope, self._curve_editors)
+        for b in curve_btns:
             active = (b is clicked_btn)
             b.setChecked(active)
             col = b._ch_color  # type: ignore[attr-defined]
@@ -4303,12 +5004,13 @@ class RightPanel(QWidget):
                 f"QPushButton:checked{{border:2px solid {C_WHITE};}}"
                 f"QPushButton:hover{{border:2px solid #999999;}}"
             )
-            self._curve_editors[b._ch_label].setVisible(active)   # type: ignore[attr-defined]
+            curve_editors[b._ch_label].setVisible(active)   # type: ignore[attr-defined]
 
     # ── HSL section ───────────────────────────────────────────────────────────
 
     def _build_hsl_content(self, lo: QVBoxLayout) -> None:
         """HSL section: 色相/饱和度/明亮度 tab buttons + 8 gradient sliders."""
+        scope = self._adjust_build_scope
         # sub-tab buttons
         tab_row = QWidget()
         tab_row.setStyleSheet("background:transparent;")
@@ -4319,6 +5021,8 @@ class RightPanel(QWidget):
         self._hsl_mode = "色相"
         self._hsl_btns: dict[str, QPushButton] = {}
         self._hsl_slider_groups: dict[str, QWidget] = {}
+        self._hsl_btns_by_scope[scope] = self._hsl_btns
+        self._hsl_slider_groups_by_scope[scope] = self._hsl_slider_groups
 
         # pill-container row: [色相] [饱和度] [明亮度] + target icon
         pill_w = QWidget()
@@ -4347,6 +5051,7 @@ class RightPanel(QWidget):
                 f"QPushButton:hover{{color:{C_TEXT_1}; background:#333333;}}"
             )
             b._hsl_mode = mode  # type: ignore[attr-defined]
+            b._adjust_scope = scope  # type: ignore[attr-defined]
             b.clicked.connect(lambda _, bn=b: self._on_hsl_mode(bn))
             pill_lo.addWidget(b)
             self._hsl_btns[mode] = b
@@ -4405,7 +5110,10 @@ class RightPanel(QWidget):
             lo.addWidget(grp)
 
     def _on_hsl_mode(self, clicked_btn: QPushButton) -> None:
-        for mode, b in self._hsl_btns.items():
+        scope = getattr(clicked_btn, "_adjust_scope", "adjust")
+        hsl_btns = self._hsl_btns_by_scope.get(scope, self._hsl_btns)
+        hsl_slider_groups = self._hsl_slider_groups_by_scope.get(scope, self._hsl_slider_groups)
+        for mode, b in hsl_btns.items():
             active = (b is clicked_btn)
             b.setChecked(active)
             b.setStyleSheet(
@@ -4414,12 +5122,15 @@ class RightPanel(QWidget):
                 f"border-radius:4px; border:none; font-size:12px; font-weight:{'500' if active else 'normal'};}}"
                 f"QPushButton:hover{{color:{C_TEXT_1}; background:#333333;}}"
             )
-            self._hsl_slider_groups[mode].setVisible(active)
+            hsl_slider_groups[mode].setVisible(active)
 
     # ── 颜色分级 section ──────────────────────────────────────────────────────
 
     def _build_color_grading_content(self, lo: QVBoxLayout) -> None:
         """Color grading: sphere preset row + 3 color wheels with lum sliders."""
+        scope = self._adjust_build_scope
+        self._color_grading_wheels_by_scope[scope] = {}
+        self._color_grading_luminance_sliders_by_scope[scope] = {}
         # ── preset sphere row ─────────────────────────────────────────────────
         presets_row = QWidget()
         presets_row.setStyleSheet("background:transparent;")
@@ -4505,39 +5216,45 @@ class RightPanel(QWidget):
             lum = ThinSlider(Qt.Orientation.Vertical, -100, 100, 0)
             lum.setFixedHeight(max(86, wheel_r * 2 + 2))
             lum.value_changed.connect(
-                lambda value, current_region=region: self._emit_color_grading_luminance_change(
+                lambda value, current_region=region, current_scope=scope: self._emit_color_grading_luminance_change(
                     current_region,
                     value,
                     committed=False,
+                    scope=current_scope,
                 )
             )
             lum.value_committed.connect(
-                lambda value, current_region=region: self._emit_color_grading_luminance_change(
+                lambda value, current_region=region, current_scope=scope: self._emit_color_grading_luminance_change(
                     current_region,
                     value,
                     committed=True,
+                    scope=current_scope,
                 )
             )
 
             whl = ColorWheelWidget(radius=wheel_r)
             whl.color_changed.connect(
-                lambda hue, sat, current_region=region: self._emit_color_grading_wheel_change(
+                lambda hue, sat, current_region=region, current_scope=scope: self._emit_color_grading_wheel_change(
                     current_region,
                     hue,
                     sat,
                     committed=False,
+                    scope=current_scope,
                 )
             )
             whl.color_change_finished.connect(
-                lambda hue, sat, current_region=region: self._emit_color_grading_wheel_change(
+                lambda hue, sat, current_region=region, current_scope=scope: self._emit_color_grading_wheel_change(
                     current_region,
                     hue,
                     sat,
                     committed=True,
+                    scope=current_scope,
                 )
             )
             self._color_grading_wheels[region] = whl
             self._color_grading_luminance_sliders[region] = lum
+            self._color_grading_wheels_by_scope[scope][region] = whl
+            self._color_grading_luminance_sliders_by_scope[scope][region] = lum
 
             r_lo.addWidget(lum, alignment=Qt.AlignmentFlag.AlignVCenter)
             r_lo.addWidget(whl, alignment=Qt.AlignmentFlag.AlignVCenter)
@@ -4573,9 +5290,11 @@ class RightPanel(QWidget):
         saturation: float,
         *,
         committed: bool,
+        scope: Optional[str] = None,
     ) -> None:
         if self._syncing_adjust_controls:
             return
+        target_scope = scope or self._adjust_build_scope
         region_label = {
             "midtones": "中间调",
             "shadows": "阴影",
@@ -4585,21 +5304,32 @@ class RightPanel(QWidget):
             f"{region}_hue": float(hue) % 360.0,
             f"{region}_saturation": max(0.0, min(100.0, float(saturation))),
         }
-        if committed:
+        if target_scope == "mask":
+            if committed:
+                self.mask_adjust_section_change_finished.emit("color_grading", payload, f"颜色分级 · {region_label} · 色轮")
+            else:
+                self.mask_adjust_section_changed.emit("color_grading", payload)
+        elif committed:
             self.adjust_section_change_finished.emit("color_grading", payload, f"颜色分级 · {region_label} · 色轮")
         else:
             self.adjust_section_changed.emit("color_grading", payload)
 
-    def _emit_color_grading_luminance_change(self, region: str, value: int, *, committed: bool) -> None:
+    def _emit_color_grading_luminance_change(self, region: str, value: int, *, committed: bool, scope: Optional[str] = None) -> None:
         if self._syncing_adjust_controls:
             return
+        target_scope = scope or self._adjust_build_scope
         region_label = {
             "midtones": "中间调",
             "shadows": "阴影",
             "highlights": "高光",
         }.get(region, region)
         payload = {f"{region}_luminance": int(value)}
-        if committed:
+        if target_scope == "mask":
+            if committed:
+                self.mask_adjust_section_change_finished.emit("color_grading", payload, f"颜色分级 · {region_label} · 明度")
+            else:
+                self.mask_adjust_section_changed.emit("color_grading", payload)
+        elif committed:
             self.adjust_section_change_finished.emit("color_grading", payload, f"颜色分级 · {region_label} · 明度")
         else:
             self.adjust_section_changed.emit("color_grading", payload)
@@ -4736,6 +5466,7 @@ class MainEditorWindow(QWidget):
         super().__init__(parent)
         self._agent_config = load_agent_config()
         self._current_tlimage: Optional[TLImage] = None
+        self._active_mask_layer_id: Optional[str] = None
         self._last_ai_request_payload: Optional[dict[str, Any]] = None
         self._last_ai_response_payload: Optional[dict[str, Any]] = None
         self._agent_thread: Optional[QThread] = None
@@ -4830,6 +5561,9 @@ class MainEditorWindow(QWidget):
         self._canvas.color_picked.connect(self._on_canvas_color_picked)
         self._canvas.crop_confirmed.connect(self._on_crop_confirmed)
         self._canvas.crop_cancelled.connect(self._on_crop_cancelled)
+        self._canvas.mask_preview_changed.connect(self._on_mask_changed)
+        self._canvas.mask_create_finished.connect(self._on_mask_created)
+        self._canvas.mask_change_finished.connect(self._on_mask_change_finished)
         self._status_bar.zoom_in_requested.connect(self._zoom_in)
         self._status_bar.zoom_out_requested.connect(self._zoom_out)
         self._ai_chatbox.request_submitted.connect(self._on_ai_chat_requested)
@@ -4840,8 +5574,14 @@ class MainEditorWindow(QWidget):
         self._right_panel.layer_visibility_changed.connect(self._on_layer_visibility_changed)
         self._right_panel.layer_opacity_changed.connect(self._on_layer_opacity_changed)
         self._right_panel.layer_opacity_change_finished.connect(self._on_layer_opacity_change_finished)
+        self._right_panel.active_layer_changed.connect(self._on_active_layer_changed)
         self._right_panel.adjust_section_changed.connect(self._on_adjust_section_changed)
         self._right_panel.adjust_section_change_finished.connect(self._on_adjust_section_change_finished)
+        self._right_panel.mask_changed.connect(self._on_mask_changed)
+        self._right_panel.mask_change_finished.connect(self._on_mask_change_finished)
+        self._right_panel.mask_adjust_section_changed.connect(self._on_mask_adjust_section_changed)
+        self._right_panel.mask_adjust_section_change_finished.connect(self._on_mask_adjust_section_change_finished)
+        self._right_panel.mask_layer_selected.connect(self._on_mask_layer_selected)
 
     def open_image(self, path: str) -> bool:
         try:
@@ -4853,6 +5593,7 @@ class MainEditorWindow(QWidget):
             return False
 
         self._current_tlimage = tl_image
+        self._active_mask_layer_id = None
         self._original_preview_cache_key = None
         self._original_preview_pixmap = None
         original_pixmap = self._get_original_preview_pixmap(tl_image, preview_max_dimension)
@@ -4983,11 +5724,41 @@ class MainEditorWindow(QWidget):
         if sync_panel:
             self._sync_right_panel_from_tlimage()
 
+    def _mask_layers(self) -> list:
+        if self._current_tlimage is None:
+            return []
+        return [
+            layer for layer in self._current_tlimage.malayers
+            if getattr(layer, "type_name", "") == "mask"
+        ]
+
     def _sync_right_panel_from_tlimage(self) -> None:
         if self._current_tlimage is None:
             return
         self._right_panel.set_malayers(self._current_tlimage.malayers)
         self._right_panel.set_edit_state(self._current_tlimage.edit_state)
+        mask_layers = self._mask_layers()
+        mask_layer_ids = {getattr(layer, "id", None) for layer in mask_layers}
+        if self._active_mask_layer_id not in mask_layer_ids:
+            self._active_mask_layer_id = getattr(mask_layers[-1], "id", None) if mask_layers else None
+        mask_layer = self._current_tlimage.get_primary_mask_layer()
+        active_mask_layer = (
+            self._current_tlimage.get_malayer(self._active_mask_layer_id)
+            if self._active_mask_layer_id
+            else mask_layer
+        )
+        if active_mask_layer is not None and getattr(active_mask_layer, "type_name", "") == "mask":
+            layer_mask = getattr(active_mask_layer, "mask", None)
+            mask_state = layer_mask.to_dict() if layer_mask else {}
+            mask_adjust_state = active_mask_layer.to_dict().get("payload", {})
+        else:
+            mask_state = self._current_tlimage.edit_state.get("mask", {})
+            mask_adjust_state = {}
+        self._right_panel.set_mask_state(mask_state if isinstance(mask_state, dict) else {})
+        self._right_panel.set_mask_adjust_state(mask_adjust_state if isinstance(mask_adjust_state, dict) else {})
+        self._right_panel.set_mask_layers(mask_layers, self._active_mask_layer_id)
+        self._canvas.set_mask_overlay(mask_state if isinstance(mask_state, dict) else {})
+        self._canvas.set_mask_overlay_visible(True)
         self._right_panel.set_history_entries(self._current_tlimage.history_entries())
         self._right_panel.set_histogram_metadata(self._current_tlimage.metadata)
 
@@ -5189,6 +5960,38 @@ class MainEditorWindow(QWidget):
         self._request_histogram_refresh(immediate=True)
         self._right_panel.set_history_entries(self._current_tlimage.history_entries())
 
+    def _on_active_layer_changed(self, idx: int) -> None:
+        if self._current_tlimage is None or idx < 0 or idx >= len(self._current_tlimage.malayers):
+            return
+        layer = self._current_tlimage.malayers[idx]
+        if getattr(layer, "type_name", "") != "mask":
+            return
+        self._active_mask_layer_id = layer.id
+        mask = getattr(layer, "mask", None)
+        mask_state = mask.to_dict() if mask else {}
+        mask_adjust_state = layer.to_dict().get("payload", {})
+        self._right_panel.set_mask_state(mask_state)
+        self._right_panel.set_mask_adjust_state(mask_adjust_state if isinstance(mask_adjust_state, dict) else {})
+        self._right_panel.set_mask_layers(self._mask_layers(), self._active_mask_layer_id)
+        self._canvas.set_mask_overlay(mask_state)
+        self._canvas.set_mask_overlay_visible(True)
+
+    def _on_mask_layer_selected(self, layer_id: str) -> None:
+        if self._current_tlimage is None:
+            return
+        layer = self._current_tlimage.get_malayer(layer_id)
+        if layer is None or getattr(layer, "type_name", "") != "mask":
+            return
+        self._active_mask_layer_id = layer.id
+        mask = getattr(layer, "mask", None)
+        mask_state = mask.to_dict() if mask else {}
+        mask_adjust_state = layer.to_dict().get("payload", {})
+        self._right_panel.set_mask_layers(self._mask_layers(), self._active_mask_layer_id)
+        self._right_panel.set_mask_state(mask_state)
+        self._right_panel.set_mask_adjust_state(mask_adjust_state if isinstance(mask_adjust_state, dict) else {})
+        self._canvas.set_mask_overlay(mask_state)
+        self._canvas.set_mask_overlay_visible(True)
+
     def _on_adjust_section_changed(self, section: str, values: dict) -> None:
         if self._current_tlimage is None:
             return
@@ -5200,6 +6003,135 @@ class MainEditorWindow(QWidget):
         if self._current_tlimage is None:
             return
         self._current_tlimage.update_adjustment(section, values, record_history=True, description=description)
+        self._schedule_preview_refresh(immediate=True)
+        self._request_histogram_refresh(immediate=True)
+        self._right_panel.set_history_entries(self._current_tlimage.history_entries())
+
+    def _on_mask_created(self, values: dict, description: str) -> None:
+        if self._current_tlimage is None or not values:
+            return
+        layer = self._current_tlimage.add_mask_layer(
+            values,
+            record_history=True,
+            description=f"{description} · 新建",
+        )
+        self._active_mask_layer_id = layer.id
+        mask_state = layer.mask.to_dict() if layer.mask else {}
+        self._right_panel.set_malayers(self._current_tlimage.malayers)
+        self._right_panel.set_mask_layers(self._mask_layers(), self._active_mask_layer_id)
+        self._right_panel.set_mask_state(mask_state)
+        self._right_panel.set_mask_adjust_state(layer.to_dict().get("payload", {}))
+        self._canvas.set_mask_overlay(mask_state)
+        self._canvas.set_mask_overlay_visible(True)
+        self._schedule_preview_refresh(immediate=True)
+        self._request_histogram_refresh(immediate=True)
+        self._right_panel.set_history_entries(self._current_tlimage.history_entries())
+
+    def _on_mask_changed(self, values: dict) -> None:
+        if self._current_tlimage is None:
+            return
+        mask_values = values if values else None
+        before_count = len(self._current_tlimage.malayers)
+        if mask_values is None and self._active_mask_layer_id is None:
+            self._current_tlimage.preview_mask(None)
+            mask_state = {}
+        else:
+            layer = self._current_tlimage.preview_mask_layer(
+                self._active_mask_layer_id,
+                mask_values,
+                create_if_missing=mask_values is not None,
+            )
+            if layer is not None:
+                self._active_mask_layer_id = layer.id
+                mask_state = layer.mask.to_dict() if layer.mask else {}
+                self._right_panel.set_mask_adjust_state(layer.to_dict().get("payload", {}))
+            else:
+                mask_state = {}
+        self._right_panel.set_mask_state(mask_state)
+        self._canvas.set_mask_overlay(mask_state)
+        self._canvas.set_mask_overlay_visible(True)
+        if len(self._current_tlimage.malayers) != before_count:
+            self._right_panel.set_malayers(self._current_tlimage.malayers)
+        self._right_panel.set_mask_layers(self._mask_layers(), self._active_mask_layer_id)
+        self._schedule_preview_refresh()
+        self._request_histogram_refresh()
+
+    def _on_mask_change_finished(self, values: dict, description: str) -> None:
+        if self._current_tlimage is None:
+            return
+        mask_values = values if values else None
+        before_count = len(self._current_tlimage.malayers)
+        if mask_values is None and self._active_mask_layer_id is None:
+            self._current_tlimage.update_mask(None, record_history=True, description=description)
+            mask_state = {}
+        else:
+            layer = self._current_tlimage.update_mask_layer(
+                self._active_mask_layer_id,
+                mask_values,
+                create_if_missing=mask_values is not None,
+                record_history=True,
+                description=description,
+            )
+            if layer is not None:
+                self._active_mask_layer_id = layer.id
+                mask_state = layer.mask.to_dict() if layer.mask else {}
+                self._right_panel.set_mask_adjust_state(layer.to_dict().get("payload", {}))
+            else:
+                mask_state = {}
+        self._right_panel.set_mask_state(mask_state if isinstance(mask_state, dict) else {})
+        self._canvas.set_mask_overlay(mask_state if isinstance(mask_state, dict) else {})
+        self._canvas.set_mask_overlay_visible(True)
+        if len(self._current_tlimage.malayers) != before_count:
+            self._right_panel.set_malayers(self._current_tlimage.malayers)
+        self._right_panel.set_mask_layers(self._mask_layers(), self._active_mask_layer_id)
+        self._schedule_preview_refresh(immediate=True)
+        self._request_histogram_refresh(immediate=True)
+        self._right_panel.set_history_entries(self._current_tlimage.history_entries())
+
+    def _active_mask_layer(self) -> Optional[Any]:
+        if self._current_tlimage is None:
+            return None
+        layer = self._current_tlimage.get_malayer(self._active_mask_layer_id) if self._active_mask_layer_id else None
+        if layer is not None and getattr(layer, "type_name", "") == "mask":
+            return layer
+        mask_layers = self._mask_layers()
+        layer = mask_layers[-1] if mask_layers else None
+        if layer is not None:
+            self._active_mask_layer_id = layer.id
+        return layer
+
+    def _on_mask_adjust_section_changed(self, section: str, values: dict) -> None:
+        if self._current_tlimage is None:
+            return
+        layer = self._active_mask_layer()
+        if layer is None:
+            return
+        self._canvas.set_mask_overlay_visible(False)
+        self._current_tlimage.preview_mask_layer_adjustment(
+            layer.id,
+            section,
+            values,
+        )
+        self._schedule_preview_refresh()
+
+    def _on_mask_adjust_section_change_finished(self, section: str, values: dict, description: str) -> None:
+        if self._current_tlimage is None:
+            return
+        layer = self._active_mask_layer()
+        if layer is None:
+            return
+        self._canvas.set_mask_overlay_visible(False)
+        mask = getattr(layer, "mask", None)
+        mask_state = mask.to_dict() if mask else None
+        self._current_tlimage.update_mask_layer(
+            layer.id,
+            mask_state,
+            adjustment={section: values},
+            create_if_missing=False,
+            record_history=True,
+            description=f"蒙版调色 · {description}",
+        )
+        self._right_panel.set_mask_adjust_state(layer.to_dict().get("payload", {}))
         self._schedule_preview_refresh(immediate=True)
         self._request_histogram_refresh(immediate=True)
         self._right_panel.set_history_entries(self._current_tlimage.history_entries())
