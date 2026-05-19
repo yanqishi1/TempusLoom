@@ -74,9 +74,36 @@ class TempusLoomColorAgent:
         return (
             f"用户风格描述：{context.style_prompt.strip()}\n\n"
             f"图片信息：\n{image_meta_json}\n\n"
-            f"当前已有调色参数：\n{current_adjust_json}\n\n"
+            f"当前已有编辑状态：\n{current_adjust_json}\n\n"
+            f"{TempusLoomColorAgent._build_local_adjustment_guidance(context.style_prompt)}"
             "请结合图片预览生成新的 TempusLoom 调色 JSON。"
         )
+
+    @staticmethod
+    def _build_local_adjustment_guidance(style_prompt: str) -> str:
+        normalized = style_prompt.strip().lower()
+        mentions_sky = any(keyword in normalized for keyword in ("天空", "sky", "蓝天"))
+        mentions_ground = any(keyword in normalized for keyword in ("地面", "ground", "前景", "foreground"))
+        asks_blue = any(keyword in normalized for keyword in ("蓝", "blue", "更青", "青蓝"))
+        preserve_ground_exposure = mentions_ground and any(
+            keyword in normalized
+            for keyword in ("保持正常", "正常曝光", "曝光不变", "不要影响", "不变", "保持")
+        )
+
+        if mentions_sky and (asks_blue or preserve_ground_exposure):
+            return (
+                "局部调色策略：用户在调整天空，同时要求地面保持正常曝光。"
+                "请优先输出完整 layers 数组，使用一个 type 为 mask 的线性渐变蒙版图层，"
+                'mask 使用 {"type": "linear", "start": {"x": 0.5, "y": 0.0}, '
+                '"end": {"x": 0.5, "y": 0.55}, "featherRadius": 8} 作为起点，'
+                '让 "payload" 只作用于天空区域；不要在该 mask layer 的 "payload" 中提高或降低地面曝光。'
+                "地面保持正常曝光，只通过蒙版衰减避免影响地面。"
+                '天空变蓝可优先使用 "payload".hsl.blue、"payload".hsl.aqua、"payload".colorGrading.highlightsHue/'
+                "highlightsSaturation，必要时轻微降低 highlights。"
+                "\n\n"
+            )
+
+        return ""
 
     @staticmethod
     def _parse_adjustment_payload(raw_text: str) -> dict[str, Any]:
@@ -101,8 +128,10 @@ class TempusLoomColorAgent:
                 raise AgentResponseError(f"模型返回的 JSON 无法解析：{raw_text[:600]}") from exc
         if not isinstance(parsed, dict):
             raise AgentResponseError("模型返回的根内容不是 JSON 对象。")
-        if "adjust" not in parsed:
+        edit_root_keys = {"adjust", "mask", "layers", "imagePath", "image_path"}
+        if not any(key in parsed for key in edit_root_keys):
             parsed = {"adjust": parsed}
         if not isinstance(parsed.get("adjust"), dict):
-            raise AgentResponseError("模型返回的 adjust 字段不是对象。")
+            if "adjust" in parsed:
+                raise AgentResponseError("模型返回的 adjust 字段不是对象。")
         return parsed

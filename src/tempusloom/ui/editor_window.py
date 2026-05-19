@@ -6226,7 +6226,7 @@ class MainEditorWindow(QWidget):
         apply_error = ""
         if self._current_tlimage is not None:
             try:
-                self._current_tlimage.apply_adjust_json_payload(
+                self._current_tlimage.apply_agent_json_payload(
                     response_payload,
                     record_history=True,
                     description=f"AI 调色 · {self._pending_ai_prompt[:24]}",
@@ -6265,7 +6265,7 @@ class MainEditorWindow(QWidget):
         return {
             "image": compressed,
             "style_prompt": prompt,
-            "current_adjust": self._current_tlimage.to_json_dict().get("adjust", {}),
+            "current_adjust": self._current_tlimage.to_json_dict(),
             "image_name": Path(self._current_tlimage.image_path).name,
         }
 

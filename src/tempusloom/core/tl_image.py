@@ -135,14 +135,20 @@ class TLImage:
             "shadows_hue": "shadows_hue",
             "shadowsSaturation": "shadows_saturation",
             "shadows_saturation": "shadows_saturation",
+            "shadowsLuminance": "shadows_luminance",
+            "shadows_luminance": "shadows_luminance",
             "midtonesHue": "midtones_hue",
             "midtones_hue": "midtones_hue",
             "midtonesSaturation": "midtones_saturation",
             "midtones_saturation": "midtones_saturation",
+            "midtonesLuminance": "midtones_luminance",
+            "midtones_luminance": "midtones_luminance",
             "highlightsHue": "highlights_hue",
             "highlights_hue": "highlights_hue",
             "highlightsSaturation": "highlights_saturation",
             "highlights_saturation": "highlights_saturation",
+            "highlightsLuminance": "highlights_luminance",
+            "highlights_luminance": "highlights_luminance",
         },
         "detail": {
             "sharpenAmount": "sharpen_amount",
@@ -489,6 +495,33 @@ class TLImage:
             root_payload,
             record_history=record_history,
             description=description or "JSON 调整",
+        )
+
+    def apply_agent_json_payload(
+        self,
+        payload: Dict[str, Any] | str,
+        *,
+        record_history: bool = False,
+        description: Optional[str] = None,
+    ) -> None:
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        if not isinstance(payload, dict):
+            raise TypeError("Agent payload must be a dict or JSON string")
+
+        edit_root_keys = {"adjust", "mask", "layers", "imagePath", "image_path"}
+        if any(key in payload for key in edit_root_keys):
+            self.apply_json_payload(
+                payload,
+                record_history=record_history,
+                description=description or "Agent JSON 调整",
+            )
+            return
+
+        self.apply_adjust_json_payload(
+            payload,
+            record_history=record_history,
+            description=description or "Agent JSON 调整",
         )
 
     @staticmethod
@@ -878,28 +911,34 @@ class TLImage:
             layers_state.append(serialized)
 
     def _sync_malayers_from_edit_state(self) -> None:
-        primary_adjustment = self._ensure_primary_adjustment_layer()
+        layers_state = self.edit_state.get("layers")
+        has_explicit_layers = isinstance(layers_state, list)
+        if has_explicit_layers:
+            self._replace_layers_from_state(layers_state)
+
+        primary_adjustment = self.get_primary_malayer_for_tab(EditorTab.ADJUST)
+        if primary_adjustment is None and not has_explicit_layers:
+            primary_adjustment = self._ensure_primary_adjustment_layer()
         adjust_state = self.edit_state.get("adjust", {})
-        if isinstance(adjust_state, dict):
+        if isinstance(adjust_state, dict) and isinstance(primary_adjustment, AdjustmentMalayer):
             self._apply_adjust_delta(primary_adjustment, adjust_state)
 
-        layers_state = self.edit_state.get("layers")
-        if isinstance(layers_state, list):
-            self._apply_layers_state(layers_state)
-
-        primary_adjustment.mask = Mask.from_dict(self.edit_state.get("mask"))
+        if "mask" in self.edit_state and isinstance(primary_adjustment, AdjustmentMalayer):
+            primary_adjustment.mask = Mask.from_dict(self.edit_state.get("mask"))
 
     def _apply_edit_state_delta(self, normalized: Dict[str, Any]) -> None:
-        primary_adjustment = self._ensure_primary_adjustment_layer()
+        if "layers" in normalized and isinstance(self.edit_state.get("layers"), list):
+            self._replace_layers_from_state(self.edit_state.get("layers", []))
 
+        has_explicit_layers = isinstance(self.edit_state.get("layers"), list)
+        primary_adjustment = self.get_primary_malayer_for_tab(EditorTab.ADJUST)
+        if primary_adjustment is None and not has_explicit_layers:
+            primary_adjustment = self._ensure_primary_adjustment_layer()
         adjust_state = normalized.get("adjust")
-        if isinstance(adjust_state, dict):
+        if isinstance(adjust_state, dict) and isinstance(primary_adjustment, AdjustmentMalayer):
             self._apply_adjust_delta(primary_adjustment, adjust_state)
 
-        if "layers" in normalized and isinstance(self.edit_state.get("layers"), list):
-            self._apply_layers_state(self.edit_state.get("layers"))
-
-        if "mask" in normalized:
+        if "mask" in normalized and isinstance(primary_adjustment, AdjustmentMalayer):
             primary_adjustment.mask = Mask.from_dict(self.edit_state.get("mask"))
 
     def _apply_adjust_delta(self, primary_adjustment: AdjustmentMalayer, adjust_state: Dict[str, Any]) -> None:
@@ -965,6 +1004,13 @@ class TLImage:
                 self.malayers.insert(max(0, min(index, len(self.malayers))), target)
             else:
                 self._apply_layer_state_to_target(target, layer_state)
+
+    def _replace_layers_from_state(self, layers_state: List[Dict[str, Any]]) -> None:
+        self.malayers = [
+            self._create_malayer_from_layer_state(layer_state)
+            for layer_state in layers_state
+            if isinstance(layer_state, dict)
+        ]
 
     @classmethod
     def _normalize_layer_type(cls, layer_type: Any) -> str:
