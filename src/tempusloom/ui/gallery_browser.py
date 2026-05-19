@@ -19,13 +19,17 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QPixmap, QColor, QPainter, QBrush, QPen, QIcon,
     QLinearGradient, QFont, QFontDatabase, QPainterPath,
+    QKeySequence, QShortcut,
 )
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QHBoxLayout, QVBoxLayout,
     QLabel, QPushButton, QScrollArea, QFrame, QFileDialog,
     QSplitter, QLineEdit, QSizePolicy, QStackedWidget, QGridLayout,
-    QGraphicsDropShadowEffect,
+    QGraphicsDropShadowEffect, QMenu, QInputDialog, QMessageBox,
 )
+
+from tempusloom.core import LibraryAsset, LibraryStore
+from tempusloom.core.gallery_navigation import GalleryNavigator
 
 # ── image file extensions ──────────────────────────────────────────────────────
 IMAGE_EXTS = {
@@ -211,19 +215,64 @@ class ThumbLoader(QRunnable):
 
 # ── thumbnail card ─────────────────────────────────────────────────────────────
 
+class StarRatingWidget(QWidget):
+    rating_changed = pyqtSignal(int)
+
+    def __init__(self, rating: int = 0, *, interactive: bool = True, parent=None) -> None:
+        super().__init__(parent)
+        self._rating = max(0, min(5, int(rating)))
+        self._interactive = interactive
+        self._buttons: list[QPushButton] = []
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(1)
+        for value in range(1, 6):
+            btn = QPushButton()
+            btn.setFixedSize(18, 18)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.clicked.connect(lambda _checked=False, v=value: self.set_rating(v, emit=True))
+            self._buttons.append(btn)
+            layout.addWidget(btn)
+        self._refresh()
+
+    def rating(self) -> int:
+        return self._rating
+
+    def set_rating(self, rating: int, *, emit: bool = False) -> None:
+        self._rating = max(0, min(5, int(rating)))
+        self._refresh()
+        if emit and self._interactive:
+            self.rating_changed.emit(self._rating)
+
+    def _refresh(self) -> None:
+        for index, btn in enumerate(self._buttons, start=1):
+            active = index <= self._rating
+            btn.setText("★" if active else "☆")
+            btn.setStyleSheet(
+                "QPushButton{background:transparent; border:none; "
+                f"color:{'#FBBF24' if active else C_TEXT_4}; font-size:14px; padding:0;}}"
+            )
+
+
 class ThumbnailCard(QWidget):
     """Single thumbnail item: rounded image + filename label."""
 
     clicked = pyqtSignal(str)   # emits file path
+    double_clicked = pyqtSignal(str)
+    rating_changed = pyqtSignal(str, int)
 
     THUMB_H = 160
 
     def __init__(self, path: str, index: int, selected: bool = False,
+                 rating: int = 0, missing: bool = False,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.path     = path
         self.index    = index
         self._selected = selected
+        self._rating = max(0, min(5, int(rating)))
+        self._missing = missing
         self._pixmap: Optional[QPixmap] = None
         self._setup_ui()
 
@@ -243,10 +292,20 @@ class ThumbnailCard(QWidget):
         )
         layout.addWidget(self._img_label)
 
+        row = QWidget()
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+
         name = Path(self.path).name if self.path else f"IMG_{self.index:04d}.RAW"
-        self._name_label = QLabel(name)
+        self._name_label = QLabel(("⚠ " if self._missing else "") + name)
         self._name_label.setObjectName("thumbName")
-        layout.addWidget(self._name_label)
+        row_layout.addWidget(self._name_label, 1)
+
+        self._rating_widget = StarRatingWidget(self._rating)
+        self._rating_widget.rating_changed.connect(lambda rating: self.rating_changed.emit(self.path, rating))
+        row_layout.addWidget(self._rating_widget)
+        layout.addWidget(row)
 
         # show placeholder immediately
         self._show_placeholder()
@@ -291,6 +350,10 @@ class ThumbnailCard(QWidget):
         self._selected = selected
         self._update_border()
 
+    def set_rating(self, rating: int) -> None:
+        self._rating = max(0, min(5, int(rating)))
+        self._rating_widget.set_rating(self._rating)
+
     def _update_border(self) -> None:
         border = f"2px solid {C_PRIMARY}" if self._selected else "none"
         self._img_label.setStyleSheet(
@@ -300,6 +363,9 @@ class ThumbnailCard(QWidget):
     # ── events ─────────────────────────────────────────────────────────────────
     def mousePressEvent(self, _event) -> None:       # noqa: N802
         self.clicked.emit(self.path)
+
+    def mouseDoubleClickEvent(self, _event) -> None:  # noqa: N802
+        self.double_clicked.emit(self.path)
 
     def enterEvent(self, _event) -> None:            # noqa: N802
         if not self._selected:
@@ -528,8 +594,9 @@ class GallerySidebar(QWidget):
         super().__init__(parent)
         self.setObjectName("sidebar")
         self.setFixedWidth(200)
-        self._active_folder = "风景"
+        self._active_folder = "全部照片"
         self._folder_items: dict[str, FolderItem] = {}
+        self._folder_list_layout: Optional[QVBoxLayout] = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -541,15 +608,12 @@ class GallerySidebar(QWidget):
         layout.addWidget(_make_label("文件夹", "sideSection"))
         layout.addSpacing(4)
 
-        for name, count in self._FOLDERS:
-            active = (name == self._active_folder)
-            icon_color = C_PRIMARY if active else C_TEXT_4
-            item = FolderItem(
-                _folder_icon(icon_color, 16), name, count, active,
-            )
-            item.clicked.connect(self._on_folder_clicked)
-            self._folder_items[name] = item
-            layout.addWidget(item)
+        folder_list = QWidget()
+        self._folder_list_layout = QVBoxLayout(folder_list)
+        self._folder_list_layout.setContentsMargins(0, 0, 0, 0)
+        self._folder_list_layout.setSpacing(4)
+        layout.addWidget(folder_list)
+        self.set_folders([("全部照片", "0")])
 
         layout.addSpacing(8)
         layout.addWidget(HLine())
@@ -580,10 +644,21 @@ class GallerySidebar(QWidget):
 
     def set_folders(self, folders: list[tuple[str, str]]) -> None:
         """Dynamically rebuild folder list from real directory scan."""
+        if self._folder_list_layout is None:
+            return
         for item in self._folder_items.values():
             item.setParent(None)
         self._folder_items.clear()
-        # Note: dynamic rebuild omitted for brevity – callers update labels
+        for name, count in folders:
+            active = name == self._active_folder
+            icon_color = C_PRIMARY if active else C_TEXT_4
+            item = FolderItem(_folder_icon(icon_color, 16), name, count, active)
+            item.clicked.connect(self._on_folder_clicked)
+            self._folder_items[name] = item
+            self._folder_list_layout.addWidget(item)
+        if self._active_folder not in self._folder_items and self._folder_items:
+            self._active_folder = next(iter(self._folder_items))
+            self._folder_items[self._active_folder].set_active(True)
 
 
 # ── grid toolbar ───────────────────────────────────────────────────────────────
@@ -594,6 +669,7 @@ class GridToolbar(QWidget):
     sort_clicked   = pyqtSignal()
     filter_clicked = pyqtSignal()
     view_clicked   = pyqtSignal()
+    rating_filter_changed = pyqtSignal(str, int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -611,17 +687,40 @@ class GridToolbar(QWidget):
         layout.addStretch()
 
         sort_btn   = _make_chip("排序 ▾")
-        filter_btn = _make_chip("筛选 ▾")
+        self._filter_btn = _make_chip("全部星级 ▾")
         view_btn   = _make_chip("⊞")
         sort_btn.clicked.connect(self.sort_clicked.emit)
-        filter_btn.clicked.connect(self.filter_clicked.emit)
+        self._filter_btn.clicked.connect(self._open_filter_menu)
         view_btn.clicked.connect(self.view_clicked.emit)
         layout.addWidget(sort_btn)
-        layout.addWidget(filter_btn)
+        layout.addWidget(self._filter_btn)
         layout.addWidget(view_btn)
 
     def update_info(self, folder: str, count: int) -> None:
         self._info_label.setText(f"{folder}  ·  {count} 张图片")
+
+    def set_rating_filter(self, mode: str, rating: int) -> None:
+        if mode == "exact":
+            self._filter_btn.setText(f"正好 {rating} 星 ▾")
+        elif mode == "minimum" and rating > 0:
+            self._filter_btn.setText(f"{rating} 星及以上 ▾")
+        else:
+            self._filter_btn.setText("全部星级 ▾")
+
+    def _open_filter_menu(self) -> None:
+        menu = QMenu(self)
+        all_action = menu.addAction("全部星级")
+        all_action.triggered.connect(lambda _checked=False: self.rating_filter_changed.emit("all", 0))
+        minimum_menu = menu.addMenu("至少")
+        for rating in range(1, 6):
+            action = minimum_menu.addAction(f"{rating} 星及以上")
+            action.triggered.connect(lambda _checked=False, r=rating: self.rating_filter_changed.emit("minimum", r))
+        exact_menu = menu.addMenu("正好")
+        for rating in range(0, 6):
+            label = "0 星（未评级）" if rating == 0 else f"{rating} 星"
+            action = exact_menu.addAction(label)
+            action.triggered.connect(lambda _checked=False, r=rating: self.rating_filter_changed.emit("exact", r))
+        menu.exec(self._filter_btn.mapToGlobal(self._filter_btn.rect().bottomLeft()))
 
 
 # ── info panel ─────────────────────────────────────────────────────────────────
@@ -631,12 +730,14 @@ class InfoPanel(QWidget):
 
     open_in_editor = pyqtSignal(str)
     export_image   = pyqtSignal(str)
+    rating_changed = pyqtSignal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("infoPanel")
         self.setFixedWidth(260)
         self._current_path: str = ""
+        self._rating = 0
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -657,6 +758,10 @@ class InfoPanel(QWidget):
         # file name
         self._title = _make_label("IMG_0123.RAW", "infoTitle")
         layout.addWidget(self._title)
+
+        self._rating_widget = StarRatingWidget(0)
+        self._rating_widget.rating_changed.connect(self.rating_changed.emit)
+        layout.addWidget(self._rating_widget)
 
         # EXIF rows
         self._exif_widget = QWidget()
@@ -707,9 +812,11 @@ class InfoPanel(QWidget):
         layout.addStretch()
 
     # ── public api ─────────────────────────────────────────────────────────────
-    def update_info(self, path: str, pixmap: Optional[QPixmap] = None) -> None:
+    def update_info(self, path: str, pixmap: Optional[QPixmap] = None, *, rating: int = 0) -> None:
         """Populate panel with metadata from *path*."""
         self._current_path = path
+        self._rating = max(0, min(5, int(rating)))
+        self._rating_widget.set_rating(self._rating)
         fname = Path(path).name if path else "—"
         self._title.setText(fname)
 
@@ -813,6 +920,8 @@ class ThumbnailGrid(QScrollArea):
     """Scrollable 3-column masonry-style grid."""
 
     image_selected = pyqtSignal(str, QPixmap)   # path, pixmap
+    image_activated = pyqtSignal(str)
+    rating_changed = pyqtSignal(str, int)
 
     COLUMNS = 3
 
@@ -826,6 +935,7 @@ class ThumbnailGrid(QScrollArea):
         self._cards: list[ThumbnailCard] = []
         self._selected_path: str = ""
         self._pixmap_cache: dict[str, QPixmap] = {}
+        self._assets_by_path: dict[str, LibraryAsset] = {}
         self._pool = QThreadPool.globalInstance()
         self._pool.setMaxThreadCount(4)
 
@@ -840,37 +950,61 @@ class ThumbnailGrid(QScrollArea):
 
     # ── loading ────────────────────────────────────────────────────────────────
     def load_images(self, paths: list[str]) -> None:
+        self.load_assets([self._asset_from_path(path) for path in paths])
+
+    def load_assets(self, assets: list[LibraryAsset]) -> None:
         # clear
         for card in self._cards:
             card.setParent(None)
         self._cards.clear()
         self._pixmap_cache.clear()
+        self._assets_by_path = {asset.path: asset for asset in assets}
 
-        if not paths:
+        if not assets:
             self._selected_path = ""
             return
 
-        for idx, path in enumerate(paths):
+        for idx, asset in enumerate(assets):
             row, col = divmod(idx, self.COLUMNS)
             selected = (idx == 0)
-            card = ThumbnailCard(path, idx, selected)
+            card = ThumbnailCard(asset.path, idx, selected, rating=asset.rating, missing=asset.missing)
             card.clicked.connect(self._on_card_clicked)
+            card.double_clicked.connect(self.image_activated.emit)
+            card.rating_changed.connect(self.rating_changed.emit)
             self._cards.append(card)
             self._grid_layout.addWidget(card, row, col)
 
         # select first
-        if paths:
-            self._selected_path = paths[0]
+        if assets:
+            self._selected_path = assets[0].path
             QTimer.singleShot(0, lambda: self.image_selected.emit(
                 self._selected_path,
                 self._pixmap_cache.get(self._selected_path, QPixmap()),
             ))
 
         # kick off async loading
-        for idx, path in enumerate(paths):
-            loader = ThumbLoader(path, 200, ThumbnailCard.THUMB_H, idx)
+        for idx, asset in enumerate(assets):
+            loader = ThumbLoader(asset.path, 200, ThumbnailCard.THUMB_H, idx)
             loader.signals.loaded.connect(self._on_thumb_loaded)
             self._pool.start(loader)
+
+    @staticmethod
+    def _asset_from_path(path: str) -> LibraryAsset:
+        file_path = Path(path)
+        return LibraryAsset(
+            id=path,
+            path=path,
+            file_name=file_path.name,
+            folder_path=str(file_path.parent),
+            extension=file_path.suffix.lower().lstrip("."),
+            file_size=0,
+            width=None,
+            height=None,
+            rating=0,
+            missing=not file_path.is_file(),
+            imported_at="",
+            updated_at="",
+        )
 
     def load_placeholders(self, count: int = 9,
                           names: Optional[list[str]] = None) -> None:
@@ -889,6 +1023,7 @@ class ThumbnailGrid(QScrollArea):
             card = ThumbnailCard("", idx, selected)
             card._name_label.setText(name)
             card.clicked.connect(self._on_card_clicked)
+            card.double_clicked.connect(self.image_activated.emit)
             self._cards.append(card)
             self._grid_layout.addWidget(card, row, col)
 
@@ -905,6 +1040,19 @@ class ThumbnailGrid(QScrollArea):
                               (not path and card._name_label.text() == self._selected_path))
         self._selected_path = path
         self.image_selected.emit(path, self._pixmap_cache.get(path, QPixmap()))
+
+    def selected_path(self) -> str:
+        return self._selected_path
+
+    def set_card_rating(self, path: str, rating: int) -> None:
+        for card in self._cards:
+            if card.path == path:
+                card.set_rating(rating)
+                break
+
+    def select_path(self, path: str) -> None:
+        if path:
+            self._on_card_clicked(path)
 
     def _on_thumb_loaded(self, path: str, px: QPixmap) -> None:
         self._pixmap_cache[path] = px
@@ -923,6 +1071,132 @@ class ThumbnailGrid(QScrollArea):
             card.setVisible(text in name if text else True)
 
 
+class GalleryLoupeView(QWidget):
+    """Large single-image browser view."""
+
+    back_to_grid = pyqtSignal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("gridArea")
+        self._path = ""
+        self._pixmap = QPixmap()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 16, 24, 16)
+        layout.setSpacing(10)
+
+        header = QWidget()
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        self._title = _make_label("—", "gridInfo")
+        header_layout.addWidget(self._title)
+        header_layout.addStretch()
+        back_btn = _make_chip("返回网格")
+        back_btn.clicked.connect(self.back_to_grid.emit)
+        header_layout.addWidget(back_btn)
+        layout.addWidget(header)
+
+        self._image = QLabel()
+        self._image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._image.setStyleSheet(f"background:{C_BG_APP}; border-radius:8px;")
+        self._image.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        layout.addWidget(self._image, 1)
+
+    def set_image(self, path: str, pixmap: QPixmap) -> None:
+        self._path = path
+        self._title.setText(Path(path).name if path else "—")
+        self._pixmap = pixmap if pixmap and not pixmap.isNull() else QPixmap(path)
+        self._refresh_pixmap()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._refresh_pixmap()
+
+    def _refresh_pixmap(self) -> None:
+        if self._pixmap.isNull():
+            self._image.clear()
+            return
+        available = self._image.size()
+        scaled = self._pixmap.scaled(
+            max(1, available.width()),
+            max(1, available.height()),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._image.setPixmap(scaled)
+
+
+class Filmstrip(QWidget):
+    """Bottom thumbnail strip for the current gallery result set."""
+
+    image_selected = pyqtSignal(str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("gridToolbar")
+        self.setFixedHeight(104)
+        self._buttons: dict[str, QPushButton] = {}
+        self._selected_path = ""
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("background:transparent; border:none;")
+        outer.addWidget(scroll)
+
+        self._content = QWidget()
+        self._layout = QHBoxLayout(self._content)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(8)
+        self._layout.addStretch()
+        scroll.setWidget(self._content)
+
+    def load_assets(self, assets: list[LibraryAsset], selected_path: str = "") -> None:
+        for button in self._buttons.values():
+            button.setParent(None)
+        self._buttons.clear()
+        self._selected_path = selected_path
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.setParent(None)
+        for asset in assets:
+            btn = QPushButton()
+            btn.setFixedSize(88, 68)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setToolTip(asset.file_name)
+            btn.clicked.connect(lambda _checked=False, p=asset.path: self.image_selected.emit(p))
+            pixmap = QPixmap(asset.path)
+            if pixmap.isNull():
+                pixmap = _placeholder_thumb(88, 68, len(self._buttons))
+            else:
+                pixmap = pixmap.scaled(
+                    88,
+                    68,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                pixmap = pixmap.copy(max(0, (pixmap.width() - 88) // 2), max(0, (pixmap.height() - 68) // 2), 88, 68)
+            btn.setIcon(QIcon(pixmap))
+            btn.setIconSize(QSize(88, 68))
+            self._buttons[asset.path] = btn
+            self._layout.addWidget(btn)
+        self._layout.addStretch()
+        self.set_selected(selected_path)
+
+    def set_selected(self, path: str) -> None:
+        self._selected_path = path
+        for button_path, button in self._buttons.items():
+            border = f"2px solid {C_PRIMARY}" if button_path == path else f"1px solid {C_BORDER}"
+            button.setStyleSheet(f"QPushButton{{background:{C_BG_ITEM}; border:{border}; border-radius:6px; padding:0;}}")
+
+
 # ── main gallery window ────────────────────────────────────────────────────────
 
 class GalleryBrowser(QWidget):
@@ -931,8 +1205,18 @@ class GalleryBrowser(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._current_dir: Optional[str] = None
+        self._store: Optional[LibraryStore] = None
+        self._assets: list[LibraryAsset] = []
+        self._asset_by_path: dict[str, LibraryAsset] = {}
+        self._active_folder_path: Optional[str] = None
+        self._rating_filter_mode = "all"
+        self._rating_filter_value = 0
+        self._search_text = ""
+        self._navigator = GalleryNavigator()
+        self._current_pixmap = QPixmap()
         self._setup_ui()
         self._connect_signals()
+        self._setup_shortcuts()
 
         # Load sample placeholders matching the design
         self._load_placeholders()
@@ -965,8 +1249,15 @@ class GalleryBrowser(QWidget):
         self._grid_toolbar = GridToolbar()
         grid_v.addWidget(self._grid_toolbar)
 
+        self._view_stack = QStackedWidget()
         self._grid = ThumbnailGrid()
-        grid_v.addWidget(self._grid, 1)
+        self._loupe = GalleryLoupeView()
+        self._view_stack.addWidget(self._grid)
+        self._view_stack.addWidget(self._loupe)
+        grid_v.addWidget(self._view_stack, 1)
+
+        self._filmstrip = Filmstrip()
+        grid_v.addWidget(self._filmstrip)
 
         content_layout.addWidget(grid_container, 1)
 
@@ -977,6 +1268,18 @@ class GalleryBrowser(QWidget):
     def _connect_signals(self) -> None:
         self._sidebar.folder_selected.connect(self._on_folder_selected)
         self._grid.image_selected.connect(self._on_image_selected)
+        self._grid.image_activated.connect(self._show_loupe_for_path)
+        self._grid.rating_changed.connect(self._set_rating_for_path)
+        self._grid_toolbar.rating_filter_changed.connect(self._set_rating_filter)
+        self._info_panel.rating_changed.connect(self._set_rating_for_selected)
+        self._loupe.back_to_grid.connect(self._show_grid)
+        self._filmstrip.image_selected.connect(self._select_path)
+
+    def _setup_shortcuts(self) -> None:
+        for rating in range(0, 6):
+            QShortcut(QKeySequence(str(rating)), self, lambda r=rating: self._set_rating_for_selected(r))
+        QShortcut(QKeySequence(Qt.Key.Key_Left), self, self._select_previous_image)
+        QShortcut(QKeySequence(Qt.Key.Key_Right), self, self._select_next_image)
 
     # ── public api for UnifiedTopBar ───────────────────────────────────────────
     def trigger_import(self) -> None:
@@ -986,7 +1289,11 @@ class GalleryBrowser(QWidget):
         self._on_tab_changed(name)
 
     def filter_by_search(self, text: str) -> None:
-        self._grid.filter_by_text(text)
+        self._search_text = text
+        self._reload_assets()
+
+    def current_image_paths(self) -> list[str]:
+        return [asset.path for asset in self._assets] if self._assets else []
 
     # ── initial data ───────────────────────────────────────────────────────────
     def _load_placeholders(self) -> None:
@@ -996,33 +1303,175 @@ class GalleryBrowser(QWidget):
 
     # ── slots ──────────────────────────────────────────────────────────────────
     def _on_import(self) -> None:
-        folder = QFileDialog.getExistingDirectory(
-            self, "选择图片文件夹", str(Path.home()),
-            QFileDialog.Option.ShowDirsOnly,
-        )
+        menu = QMenu(self)
+        create_action = menu.addAction("创建图库项目...")
+        open_action = menu.addAction("打开图库项目...")
+        menu.addSeparator()
+        add_folder_action = menu.addAction("添加文件夹到图库...")
+        add_images_action = menu.addAction("添加图片到图库...")
+        action = menu.exec(self.mapToGlobal(self.rect().topRight()))
+        if action == create_action:
+            self._create_library_project()
+        elif action == open_action:
+            self._open_library_project()
+        elif action == add_folder_action:
+            self._add_folder_to_library()
+        elif action == add_images_action:
+            self._add_images_to_library()
+
+    def _create_library_project(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "选择初始图片文件夹", str(Path.home()), QFileDialog.Option.ShowDirsOnly)
         if not folder:
             return
-        self._current_dir = folder
-        paths = sorted(
-            str(p) for p in Path(folder).rglob("*")
-            if p.suffix.lower() in IMAGE_EXTS
-        )
-        if not paths:
+        library_parent = QFileDialog.getExistingDirectory(self, "选择图库项目保存位置", str(Path.home()), QFileDialog.Option.ShowDirsOnly)
+        if not library_parent:
             return
-        self._grid.load_images(paths)
-        self._grid_toolbar.update_info(Path(folder).name, len(paths))
+        default_name = Path(folder).name or "TempusLoom Library"
+        name, ok = QInputDialog.getText(self, "创建图库项目", "图库名称：", text=default_name)
+        if not ok or not name.strip():
+            return
+        library_path = Path(library_parent) / f"{name.strip()}.tlibrary"
+        try:
+            self._store = LibraryStore.create(library_path, name.strip(), initial_folder=folder)
+        except Exception as exc:
+            QMessageBox.warning(self, "创建图库失败", str(exc))
+            return
+        self._current_dir = folder
+        self._active_folder_path = None
+        self._reload_assets()
+
+    def _open_library_project(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "打开图库项目", str(Path.home()), QFileDialog.Option.ShowDirsOnly)
+        if not folder:
+            return
+        try:
+            self._store = LibraryStore.open(folder)
+        except Exception as exc:
+            QMessageBox.warning(self, "打开图库失败", str(exc))
+            return
+        self._active_folder_path = None
+        self._reload_assets()
+
+    def _ensure_library(self) -> bool:
+        if self._store is not None:
+            return True
+        QMessageBox.information(self, "请先创建图库", "请先创建或打开一个图库项目。")
+        return False
+
+    def _add_folder_to_library(self) -> None:
+        if not self._ensure_library():
+            return
+        folder = QFileDialog.getExistingDirectory(self, "添加文件夹到图库", str(Path.home()), QFileDialog.Option.ShowDirsOnly)
+        if not folder:
+            return
+        result = self._store.add_folder(folder)
+        self._active_folder_path = None
+        self._reload_assets()
+        QMessageBox.information(self, "导入完成", f"扫描 {result.scanned} 张，新增 {result.imported} 张，跳过 {result.skipped} 张。")
+
+    def _add_images_to_library(self) -> None:
+        if not self._ensure_library():
+            return
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "添加图片到图库",
+            str(Path.home()),
+            "Images (*.jpg *.jpeg *.png *.tif *.tiff *.webp *.bmp)",
+        )
+        if not files:
+            return
+        result = self._store.add_images(files)
+        self._reload_assets()
+        QMessageBox.information(self, "导入完成", f"扫描 {result.scanned} 张，新增 {result.imported} 张，跳过 {result.skipped} 张。")
 
     def _on_tab_changed(self, tab: str) -> None:
         # placeholder – extend for real recent/favorites data
         pass
 
     def _on_folder_selected(self, name: str) -> None:
-        self._grid_toolbar.update_info(name, 24)
-        # Reset to placeholder for demo; load real data when dir is set
-        if self._current_dir:
-            self._on_import()
+        if name == "全部照片":
+            self._active_folder_path = None
         else:
-            self._load_placeholders()
+            self._active_folder_path = name
+        self._reload_assets()
 
     def _on_image_selected(self, path: str, pixmap: QPixmap) -> None:
-        self._info_panel.update_info(path, pixmap)
+        self._navigator.select(path)
+        self._current_pixmap = pixmap
+        asset = self._asset_by_path.get(path)
+        self._info_panel.update_info(path, pixmap, rating=asset.rating if asset else 0)
+        self._filmstrip.set_selected(path)
+        if self._view_stack.currentWidget() == self._loupe:
+            self._loupe.set_image(path, pixmap)
+
+    def _set_rating_filter(self, mode: str, rating: int) -> None:
+        if mode not in {"all", "minimum", "exact"}:
+            mode = "all"
+        self._rating_filter_mode = mode
+        self._rating_filter_value = max(0, min(5, int(rating)))
+        self._grid_toolbar.set_rating_filter(self._rating_filter_mode, self._rating_filter_value)
+        self._reload_assets()
+
+    def _set_rating_for_selected(self, rating: int) -> None:
+        path = self._grid.selected_path()
+        if path:
+            self._set_rating_for_path(path, rating)
+
+    def _set_rating_for_path(self, path: str, rating: int) -> None:
+        if not self._store:
+            return
+        asset = self._asset_by_path.get(path)
+        if not asset:
+            return
+        self._store.set_rating(asset.id, rating)
+        self._grid.set_card_rating(path, rating)
+        self._reload_assets(keep_selection=path)
+
+    def _reload_assets(self, *, keep_selection: Optional[str] = None) -> None:
+        if not self._store:
+            self._load_placeholders()
+            return
+        exact_rating = self._rating_filter_value if self._rating_filter_mode == "exact" else None
+        min_rating = self._rating_filter_value if self._rating_filter_mode == "minimum" else 0
+        self._assets = self._store.query_images(
+            min_rating=min_rating,
+            exact_rating=exact_rating,
+            search=self._search_text,
+            folder_path=self._active_folder_path,
+        )
+        self._asset_by_path = {asset.path: asset for asset in self._assets}
+        preferred = keep_selection or self._navigator.current_path
+        selected_path = self._navigator.set_paths([asset.path for asset in self._assets], preferred_path=preferred)
+        self._grid.load_assets(self._assets)
+        self._filmstrip.load_assets(self._assets, selected_path=selected_path)
+        if selected_path:
+            self._grid.select_path(selected_path)
+        label = Path(self._active_folder_path).name if self._active_folder_path else "全部照片"
+        self._grid_toolbar.update_info(label, len(self._assets))
+        folders = [("全部照片", str(len(self._store.query_images(include_missing=True))))]
+        folders.extend((folder, str(count)) for folder, count in self._store.folder_counts())
+        self._sidebar.set_folders(folders)
+
+    def _select_path(self, path: str) -> None:
+        if path in self._asset_by_path:
+            self._navigator.select(path)
+            self._grid.select_path(path)
+
+    def _select_next_image(self) -> None:
+        path = self._navigator.next_path()
+        if path:
+            self._select_path(path)
+
+    def _select_previous_image(self) -> None:
+        path = self._navigator.previous_path()
+        if path:
+            self._select_path(path)
+
+    def _show_loupe_for_path(self, path: str) -> None:
+        if path:
+            self._select_path(path)
+            self._loupe.set_image(path, self._current_pixmap)
+            self._view_stack.setCurrentWidget(self._loupe)
+
+    def _show_grid(self) -> None:
+        self._view_stack.setCurrentWidget(self._grid)
