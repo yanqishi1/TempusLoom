@@ -25,7 +25,7 @@ from .malayer import (
 )
 from .tl_image import TLImage
 from .gallery_navigation import GalleryNavigator
-from .library_store import ImportResult, LibraryAsset, LibraryStore
+from .library_store import ImportResult, LibraryAsset, LibraryProject, LibraryProjectIndex, LibraryStore
 
 __all__ = [
     "AdjustmentMalayer",
@@ -49,6 +49,8 @@ __all__ = [
     "Mask",
     "ImportResult",
     "LibraryAsset",
+    "LibraryProject",
+    "LibraryProjectIndex",
     "LibraryStore",
     "TLImage",
     "ToneParams",

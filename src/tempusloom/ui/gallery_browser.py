@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 import datetime
+from datetime import datetime as DateTime
 from pathlib import Path
 from typing import Optional
 
@@ -19,7 +20,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QPixmap, QColor, QPainter, QBrush, QPen, QIcon,
     QLinearGradient, QFont, QFontDatabase, QPainterPath,
-    QKeySequence, QShortcut,
+    QKeySequence, QShortcut, QImage,
 )
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QHBoxLayout, QVBoxLayout,
@@ -28,8 +29,9 @@ from PyQt6.QtWidgets import (
     QGraphicsDropShadowEffect, QMenu, QInputDialog, QMessageBox,
 )
 
-from tempusloom.core import LibraryAsset, LibraryStore
-from tempusloom.core.gallery_navigation import GalleryNavigator
+from tempusloom.core import LibraryAsset, LibraryProject, LibraryProjectIndex, LibraryStore
+from tempusloom.core.gallery_navigation import GalleryNavigator, gallery_tab_shows_project_browser, neighboring_paths
+from PIL import Image, ImageOps
 
 # ── image file extensions ──────────────────────────────────────────────────────
 IMAGE_EXTS = {
@@ -178,6 +180,27 @@ def _placeholder_thumb(width: int, height: int, index: int = 0) -> QPixmap:
     return px
 
 
+def _format_project_time(value: str) -> str:
+    if not value:
+        return "未知时间"
+    try:
+        parsed = DateTime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    return parsed.strftime("%Y.%m.%d %H:%M")
+
+
+def _load_oriented_pixmap(path: str) -> QPixmap:
+    try:
+        with Image.open(path) as image:
+            image = ImageOps.exif_transpose(image).convert("RGBA")
+            data = image.tobytes("raw", "RGBA")
+            qimage = QImage(data, image.width, image.height, QImage.Format.Format_RGBA8888)
+            return QPixmap.fromImage(qimage.copy())
+    except Exception:
+        return QPixmap(path)
+
+
 # ── async thumbnail loader ─────────────────────────────────────────────────────
 
 class ThumbSignals(QObject):
@@ -196,7 +219,7 @@ class ThumbLoader(QRunnable):
         self.signals = ThumbSignals()
 
     def run(self) -> None:
-        px = QPixmap(self.path)
+        px = _load_oriented_pixmap(self.path)
         if px.isNull():
             px = _placeholder_thumb(self.width, self.height, self.index)
         else:
@@ -211,6 +234,18 @@ class ThumbLoader(QRunnable):
                 y = (px.height() - self.height) // 2
                 px = px.copy(x, y, self.width, self.height)
         self.signals.loaded.emit(self.path, px)
+
+
+class FullImageLoader(QRunnable):
+    """Load an original-resolution pixmap for loupe browsing."""
+
+    def __init__(self, path: str) -> None:
+        super().__init__()
+        self.path = path
+        self.signals = ThumbSignals()
+
+    def run(self) -> None:
+        self.signals.loaded.emit(self.path, _load_oriented_pixmap(self.path))
 
 
 # ── thumbnail card ─────────────────────────────────────────────────────────────
@@ -297,7 +332,7 @@ class ThumbnailCard(QWidget):
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(4)
 
-        name = Path(self.path).name if self.path else f"IMG_{self.index:04d}.RAW"
+        name = Path(self.path).name if self.path else "未命名图片"
         self._name_label = QLabel(("⚠ " if self._missing else "") + name)
         self._name_label.setObjectName("thumbName")
         row_layout.addWidget(self._name_label, 1)
@@ -376,6 +411,224 @@ class ThumbnailCard(QWidget):
 
     def leaveEvent(self, _event) -> None:            # noqa: N802
         self._update_border()
+
+
+class LibraryProjectCard(QWidget):
+    """Single local library project shown on the gallery start page."""
+
+    opened = pyqtSignal(str)
+    menu_requested = pyqtSignal(str, object)
+    CARD_W = 260
+    CARD_H = 260
+    COVER_W = 260
+    COVER_H = 168
+
+    def __init__(self, project: LibraryProject, index: int, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._project = project
+        self._index = index
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(self.CARD_W, self.CARD_H)
+        self.setStyleSheet(
+            f"QWidget{{background:#23272d; border:1px solid {C_BORDER}; border-radius:4px;}}"
+            f"QWidget:hover{{border:1px solid {C_PRIMARY};}}"
+        )
+        self._setup_ui()
+
+    def _setup_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._cover = QLabel()
+        self._cover.setFixedSize(self.COVER_W, self.COVER_H)
+        self._cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._cover.setStyleSheet("border:none; border-radius:0; background:#0d0d0d;")
+        layout.addWidget(self._cover)
+
+        body = QWidget()
+        body.setStyleSheet("background:transparent; border:none;")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(14, 12, 14, 12)
+        body_layout.setSpacing(4)
+
+        title = _make_label(self._project.name, "thumbName")
+        title.setStyleSheet(f"background:transparent; border:none; color:{C_TEXT_1}; font-size:14px; font-weight:700;")
+        body_layout.addWidget(title)
+
+        created = _make_label(f"创建于{_format_project_time(self._project.created_at)}", "gridInfo")
+        created.setStyleSheet(f"background:transparent; border:none; color:{C_TEXT_3}; font-size:12px;")
+        body_layout.addWidget(created)
+
+        updated = _make_label(f"更新于{_format_project_time(self._project.updated_at)}", "gridInfo")
+        updated.setStyleSheet(f"background:transparent; border:none; color:{C_TEXT_3}; font-size:12px;")
+        body_layout.addWidget(updated)
+
+        body_layout.addStretch()
+        layout.addWidget(body, 1)
+
+        self._set_cover()
+
+    def _set_cover(self) -> None:
+        cover_paths = list(self._project.cover_paths) or ([self._project.cover_path] if self._project.cover_path else [])
+        canvas = QPixmap(self.COVER_W, self.COVER_H)
+        canvas.fill(QColor("#0d0d0d"))
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        if not cover_paths:
+            painter.drawPixmap(0, 0, _placeholder_thumb(self.COVER_W, self.COVER_H, self._index))
+        else:
+            for slot, rect in enumerate(self._cover_rects(len(cover_paths))):
+                pixmap = _load_oriented_pixmap(cover_paths[slot])
+                if pixmap.isNull():
+                    pixmap = _placeholder_thumb(rect.width(), rect.height(), self._index + slot)
+                else:
+                    pixmap = pixmap.scaled(
+                        rect.width(),
+                        rect.height(),
+                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    pixmap = pixmap.copy(
+                        max(0, (pixmap.width() - rect.width()) // 2),
+                        max(0, (pixmap.height() - rect.height()) // 2),
+                        rect.width(),
+                        rect.height(),
+                    )
+                painter.drawPixmap(rect, pixmap)
+
+        badge = f"共{self._project.image_count}张"
+        metrics = painter.fontMetrics()
+        badge_w = metrics.horizontalAdvance(badge) + 18
+        badge_h = 24
+        badge_x = 10
+        badge_y = self.COVER_H - badge_h - 10
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 150))
+        painter.drawRect(badge_x, badge_y, badge_w, badge_h)
+        painter.setPen(QColor(C_TEXT_1))
+        painter.drawText(badge_x + 9, badge_y, badge_w - 18, badge_h, Qt.AlignmentFlag.AlignVCenter, badge)
+        painter.end()
+        self._cover.setPixmap(canvas)
+
+    def _cover_rects(self, count: int) -> list:
+        if count <= 1:
+            return [self._cover.rect()]
+        if count == 2:
+            half = self.COVER_W // 2
+            return [
+                self._cover.rect().adjusted(0, 0, -half, 0),
+                self._cover.rect().adjusted(half, 0, 0, 0),
+            ]
+        left_w = int(self.COVER_W * 0.62)
+        right_w = self.COVER_W - left_w
+        if count == 3:
+            return [
+                self._cover.rect().adjusted(0, 0, -right_w, 0),
+                self._cover.rect().adjusted(left_w, 0, 0, -(self.COVER_H // 2)),
+                self._cover.rect().adjusted(left_w, self.COVER_H // 2, 0, 0),
+            ]
+        return [
+            self._cover.rect().adjusted(0, 0, -right_w, 0),
+            self._cover.rect().adjusted(left_w, 0, 0, -(self.COVER_H * 2 // 3)),
+            self._cover.rect().adjusted(left_w, self.COVER_H // 3, 0, -(self.COVER_H // 3)),
+            self._cover.rect().adjusted(left_w, self.COVER_H * 2 // 3, 0, 0),
+        ]
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if (
+            event.button() == Qt.MouseButton.RightButton
+            or event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
+            self.menu_requested.emit(self._project.library_path, event.globalPosition().toPoint())
+            return
+        self.opened.emit(self._project.library_path)
+
+    def mouseDoubleClickEvent(self, _event) -> None:  # noqa: N802
+        self.opened.emit(self._project.library_path)
+
+
+class NewLibraryProjectCard(QWidget):
+    """Create-library entry shown before registered library projects."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(LibraryProjectCard.CARD_W, LibraryProjectCard.CARD_H)
+        self.setStyleSheet(
+            f"QWidget{{background:#0d0d0d; border:1px solid #3a3a3a; border-radius:4px;}}"
+            f"QWidget:hover{{border:1px solid {C_PRIMARY};}}"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        plus = QLabel("+")
+        plus.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        plus.setStyleSheet("background:transparent; border:none; color:#8a8a8a; font-size:56px; font-weight:200;")
+        layout.addWidget(plus)
+
+    def mousePressEvent(self, _event) -> None:  # noqa: N802
+        self.clicked.emit()
+
+
+class LibraryProjectGrid(QScrollArea):
+    """Start page listing local library projects."""
+
+    create_requested = pyqtSignal()
+    project_opened = pyqtSignal(str)
+    project_menu_requested = pyqtSignal(str, object)
+
+    COLUMNS = 5
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("gridArea")
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._cards: list[LibraryProjectCard] = []
+
+        self._container = QWidget()
+        self._container.setObjectName("gridArea")
+        self._layout = QGridLayout(self._container)
+        self._layout.setContentsMargins(28, 20, 28, 20)
+        self._layout.setHorizontalSpacing(18)
+        self._layout.setVerticalSpacing(18)
+        for col in range(self.COLUMNS):
+            self._layout.setColumnMinimumWidth(col, LibraryProjectCard.CARD_W)
+            self._layout.setColumnStretch(col, 0)
+        self._layout.setColumnStretch(self.COLUMNS, 1)
+        self._layout.setRowStretch(999, 1)
+        self.setWidget(self._container)
+
+    def load_projects(self, projects: list[LibraryProject]) -> None:
+        self._clear()
+
+        create_card = NewLibraryProjectCard()
+        create_card.clicked.connect(self.create_requested.emit)
+        self._layout.addWidget(create_card, 0, 0)
+
+        for idx, project in enumerate(projects):
+            row, col = divmod(idx + 1, self.COLUMNS)
+            card = LibraryProjectCard(project, idx)
+            card.opened.connect(self.project_opened.emit)
+            card.menu_requested.connect(self.project_menu_requested.emit)
+            self._cards.append(card)
+            self._layout.addWidget(card, row, col)
+        last_row = len(projects) // self.COLUMNS
+        self._layout.setRowStretch(last_row + 1, 1)
+
+    def _clear(self) -> None:
+        for card in self._cards:
+            card.setParent(None)
+        self._cards.clear()
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.setParent(None)
 
 
 # ── top bar ────────────────────────────────────────────────────────────────────
@@ -522,9 +775,11 @@ class FolderItem(QWidget):
     clicked = pyqtSignal(str)
 
     def __init__(self, icon_px: QPixmap, name: str, count: str = "",
+                 value: Optional[str] = None,
                  active: bool = False, parent=None) -> None:
         super().__init__(parent)
         self._name   = name
+        self._value = value if value is not None else name
         self._active = active
         self._setup_ui(icon_px, name, count)
         self._update_style()
@@ -570,33 +825,25 @@ class FolderItem(QWidget):
         self._update_style()
 
     def mousePressEvent(self, _event) -> None:      # noqa: N802
-        self.clicked.emit(self._name)
+        self.clicked.emit(self._value)
 
 
 class GallerySidebar(QWidget):
-    """Left sidebar: folder list + tags (w=200)."""
+    """Left sidebar: library list + tags (w=200)."""
 
     folder_selected = pyqtSignal(str)
-
-    _FOLDERS = [
-        ("风景",   "24"),
-        ("人像",   "18"),
-        ("产品",   "12"),
-        ("客户项目", "8"),
-    ]
-    _TAGS = [
-        ("假日", "#22C55E"),
-        ("工作", "#F59E0B"),
-        ("旅行", "#6366F1"),
-    ]
+    tag_selected = pyqtSignal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("sidebar")
         self.setFixedWidth(200)
-        self._active_folder = "全部照片"
-        self._folder_items: dict[str, FolderItem] = {}
-        self._folder_list_layout: Optional[QVBoxLayout] = None
+        self._active_library_path = ""
+        self._active_tag = ""
+        self._library_items: dict[str, FolderItem] = {}
+        self._tag_items: dict[str, FolderItem] = {}
+        self._library_list_layout: Optional[QVBoxLayout] = None
+        self._tag_list_layout: Optional[QVBoxLayout] = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -604,61 +851,84 @@ class GallerySidebar(QWidget):
         layout.setContentsMargins(12, 16, 12, 16)
         layout.setSpacing(4)
 
-        # ── folders ───────────────────────────────────────────────────────────
-        layout.addWidget(_make_label("文件夹", "sideSection"))
+        layout.addWidget(_make_label("图库", "sideSection"))
         layout.addSpacing(4)
 
-        folder_list = QWidget()
-        self._folder_list_layout = QVBoxLayout(folder_list)
-        self._folder_list_layout.setContentsMargins(0, 0, 0, 0)
-        self._folder_list_layout.setSpacing(4)
-        layout.addWidget(folder_list)
-        self.set_folders([("全部照片", "0")])
+        library_list = QWidget()
+        self._library_list_layout = QVBoxLayout(library_list)
+        self._library_list_layout.setContentsMargins(0, 0, 0, 0)
+        self._library_list_layout.setSpacing(4)
+        layout.addWidget(library_list)
 
         layout.addSpacing(8)
         layout.addWidget(HLine())
         layout.addSpacing(8)
 
-        # ── tags ──────────────────────────────────────────────────────────────
         layout.addWidget(_make_label("标签", "sideSection"))
         layout.addSpacing(4)
 
-        for tag_name, tag_color in self._TAGS:
-            item = FolderItem(
-                _tag_icon(tag_color, 14), tag_name, active=False,
-            )
-            item.clicked.connect(self._on_folder_clicked)
-            layout.addWidget(item)
+        tag_list = QWidget()
+        self._tag_list_layout = QVBoxLayout(tag_list)
+        self._tag_list_layout.setContentsMargins(0, 0, 0, 0)
+        self._tag_list_layout.setSpacing(4)
+        layout.addWidget(tag_list)
 
         layout.addStretch()
 
-    def _on_folder_clicked(self, name: str) -> None:
-        # deactivate old
-        if name in self._folder_items:
-            old = self._folder_items.get(self._active_folder)
-            if old:
-                old.set_active(False)
-            self._folder_items[name].set_active(True)
-            self._active_folder = name
-        self.folder_selected.emit(name)
+    def _on_library_clicked(self, library_path: str) -> None:
+        old = self._library_items.get(self._active_library_path)
+        if old:
+            old.set_active(False)
+        self._active_library_path = library_path
+        if library_path in self._library_items:
+            self._library_items[library_path].set_active(True)
+        self.folder_selected.emit(library_path)
 
-    def set_folders(self, folders: list[tuple[str, str]]) -> None:
-        """Dynamically rebuild folder list from real directory scan."""
-        if self._folder_list_layout is None:
+    def _on_tag_clicked(self, name: str) -> None:
+        old = self._tag_items.get(self._active_tag)
+        if old:
+            old.set_active(False)
+        self._active_tag = name
+        if name in self._tag_items:
+            self._tag_items[name].set_active(True)
+        self.tag_selected.emit(name)
+
+    def set_libraries(self, projects: list[LibraryProject], active_library_path: str = "") -> None:
+        if self._library_list_layout is None:
             return
-        for item in self._folder_items.values():
+        for item in self._library_items.values():
             item.setParent(None)
-        self._folder_items.clear()
-        for name, count in folders:
-            active = name == self._active_folder
+        self._library_items.clear()
+        self._active_library_path = active_library_path
+        for project in projects:
+            active = project.library_path == active_library_path
             icon_color = C_PRIMARY if active else C_TEXT_4
-            item = FolderItem(_folder_icon(icon_color, 16), name, count, active)
-            item.clicked.connect(self._on_folder_clicked)
-            self._folder_items[name] = item
-            self._folder_list_layout.addWidget(item)
-        if self._active_folder not in self._folder_items and self._folder_items:
-            self._active_folder = next(iter(self._folder_items))
-            self._folder_items[self._active_folder].set_active(True)
+            item = FolderItem(
+                _folder_icon(icon_color, 16),
+                project.name,
+                str(project.image_count),
+                value=project.library_path,
+                active=active,
+            )
+            item.clicked.connect(self._on_library_clicked)
+            self._library_items[project.library_path] = item
+            self._library_list_layout.addWidget(item)
+
+    def set_tags(self, tags: list[tuple[str, str]]) -> None:
+        if self._tag_list_layout is None:
+            return
+        for item in self._tag_items.values():
+            item.setParent(None)
+        self._tag_items.clear()
+        for name, count in tags:
+            active = name == self._active_tag
+            icon_color = C_PRIMARY if active else C_TEXT_4
+            item = FolderItem(_tag_icon(icon_color, 14), name, count, active)
+            item.clicked.connect(self._on_tag_clicked)
+            self._tag_items[name] = item
+            self._tag_list_layout.addWidget(item)
+        if self._active_tag not in self._tag_items:
+            self._active_tag = ""
 
 
 # ── grid toolbar ───────────────────────────────────────────────────────────────
@@ -670,6 +940,7 @@ class GridToolbar(QWidget):
     filter_clicked = pyqtSignal()
     view_clicked   = pyqtSignal()
     rating_filter_changed = pyqtSignal(str, int)
+    back_to_projects_clicked = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -682,22 +953,32 @@ class GridToolbar(QWidget):
         layout.setContentsMargins(16, 0, 16, 0)
         layout.setSpacing(8)
 
-        self._info_label = _make_label("风景  ·  24 张图片", "gridInfo")
+        self._info_label = _make_label("图库项目  ·  0 张图片", "gridInfo")
         layout.addWidget(self._info_label)
         layout.addStretch()
 
+        self._back_btn = _make_chip("返回所有图库")
+        self._back_btn.clicked.connect(self.back_to_projects_clicked.emit)
+        self._back_btn.hide()
         sort_btn   = _make_chip("排序 ▾")
         self._filter_btn = _make_chip("全部星级 ▾")
         view_btn   = _make_chip("⊞")
         sort_btn.clicked.connect(self.sort_clicked.emit)
         self._filter_btn.clicked.connect(self._open_filter_menu)
         view_btn.clicked.connect(self.view_clicked.emit)
+        layout.addWidget(self._back_btn)
         layout.addWidget(sort_btn)
         layout.addWidget(self._filter_btn)
         layout.addWidget(view_btn)
 
     def update_info(self, folder: str, count: int) -> None:
         self._info_label.setText(f"{folder}  ·  {count} 张图片")
+
+    def set_info_text(self, text: str) -> None:
+        self._info_label.setText(text)
+
+    def set_project_browser_mode(self, is_project_browser: bool) -> None:
+        self._back_btn.setVisible(not is_project_browser)
 
     def set_rating_filter(self, mode: str, rating: int) -> None:
         if mode == "exact":
@@ -731,6 +1012,8 @@ class InfoPanel(QWidget):
     open_in_editor = pyqtSignal(str)
     export_image   = pyqtSignal(str)
     rating_changed = pyqtSignal(int)
+    tags_changed = pyqtSignal(list)
+    tag_selected = pyqtSignal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -738,6 +1021,9 @@ class InfoPanel(QWidget):
         self.setFixedWidth(260)
         self._current_path: str = ""
         self._rating = 0
+        self._updating_tags = False
+        self._global_tag_items: dict[str, FolderItem] = {}
+        self._global_tag_layout: Optional[QVBoxLayout] = None
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -756,12 +1042,19 @@ class InfoPanel(QWidget):
         layout.addWidget(self._preview)
 
         # file name
-        self._title = _make_label("IMG_0123.RAW", "infoTitle")
+        self._title = _make_label("—", "infoTitle")
         layout.addWidget(self._title)
 
         self._rating_widget = StarRatingWidget(0)
         self._rating_widget.rating_changed.connect(self.rating_changed.emit)
         layout.addWidget(self._rating_widget)
+
+        layout.addWidget(_make_label("标签", "infoLabel"))
+        self._tag_edit = QLineEdit()
+        self._tag_edit.setObjectName("searchBox")
+        self._tag_edit.setPlaceholderText("输入标签，用逗号分隔")
+        self._tag_edit.editingFinished.connect(self._emit_tags_changed)
+        layout.addWidget(self._tag_edit)
 
         # EXIF rows
         self._exif_widget = QWidget()
@@ -783,6 +1076,15 @@ class InfoPanel(QWidget):
             exif_layout.addWidget(row)
             self._exif_rows.append((lbl_k, lbl_v))
         layout.addWidget(self._exif_widget)
+
+        layout.addWidget(HLine())
+
+        layout.addWidget(_make_label("按标签浏览", "infoActTitle"))
+        self._global_tag_widget = QWidget()
+        self._global_tag_layout = QVBoxLayout(self._global_tag_widget)
+        self._global_tag_layout.setContentsMargins(0, 0, 0, 0)
+        self._global_tag_layout.setSpacing(4)
+        layout.addWidget(self._global_tag_widget)
 
         layout.addWidget(HLine())
 
@@ -812,11 +1114,21 @@ class InfoPanel(QWidget):
         layout.addStretch()
 
     # ── public api ─────────────────────────────────────────────────────────────
-    def update_info(self, path: str, pixmap: Optional[QPixmap] = None, *, rating: int = 0) -> None:
+    def update_info(
+        self,
+        path: str,
+        pixmap: Optional[QPixmap] = None,
+        *,
+        rating: int = 0,
+        tags: Optional[list[str]] = None,
+    ) -> None:
         """Populate panel with metadata from *path*."""
         self._current_path = path
         self._rating = max(0, min(5, int(rating)))
         self._rating_widget.set_rating(self._rating)
+        self._updating_tags = True
+        self._tag_edit.setText("，".join(tags or []))
+        self._updating_tags = False
         fname = Path(path).name if path else "—"
         self._title.setText(fname)
 
@@ -848,16 +1160,44 @@ class InfoPanel(QWidget):
         exif_values = self._read_exif(path)
         keys = ("尺寸", "拍摄日期", "相机", "光圈", "ISO", "焦距", "快门")
         defaults = {
-            "尺寸":   "5472 × 3648 px",
-            "拍摄日期": "2025-04-15",
-            "相机":   "Canon EOS R5",
-            "光圈":   "f/2.8",
-            "ISO":   "100",
-            "焦距":   "24 mm",
-            "快门":   "1/125 s",
+            "尺寸":   "—",
+            "拍摄日期": "—",
+            "相机":   "—",
+            "光圈":   "—",
+            "ISO":   "—",
+            "焦距":   "—",
+            "快门":   "—",
         }
         for (lbl_k, lbl_v), key in zip(self._exif_rows, keys):
             lbl_v.setText(exif_values.get(key, defaults.get(key, "—")))
+
+    def set_global_tags(self, tags: list[tuple[str, str]], active_tag: str = "") -> None:
+        if self._global_tag_layout is None:
+            return
+        for item in self._global_tag_items.values():
+            item.setParent(None)
+        self._global_tag_items.clear()
+        for name, count in tags:
+            active = name == active_tag
+            icon_color = C_PRIMARY if active else C_TEXT_4
+            item = FolderItem(_tag_icon(icon_color, 14), name, count, active)
+            item.clicked.connect(self.tag_selected.emit)
+            self._global_tag_items[name] = item
+            self._global_tag_layout.addWidget(item)
+        self._global_tag_widget.setVisible(bool(tags))
+
+    def _emit_tags_changed(self) -> None:
+        if self._updating_tags:
+            return
+        text = self._tag_edit.text()
+        tags: list[str] = []
+        seen: set[str] = set()
+        for chunk in text.replace("，", ",").split(","):
+            name = chunk.strip()
+            if name and name not in seen:
+                seen.add(name)
+                tags.append(name)
+        self.tags_changed.emit(tags)
 
     @staticmethod
     def _read_exif(path: str) -> dict[str, str]:
@@ -1006,33 +1346,6 @@ class ThumbnailGrid(QScrollArea):
             updated_at="",
         )
 
-    def load_placeholders(self, count: int = 9,
-                          names: Optional[list[str]] = None) -> None:
-        """Show placeholder cards (no real file paths)."""
-        fake_paths = [
-            names[i] if names and i < len(names) else f"IMG_{i+123:04d}.RAW"
-            for i in range(count)
-        ]
-        for card in self._cards:
-            card.setParent(None)
-        self._cards.clear()
-
-        for idx, name in enumerate(fake_paths):
-            row, col = divmod(idx, self.COLUMNS)
-            selected = (idx == 0)
-            card = ThumbnailCard("", idx, selected)
-            card._name_label.setText(name)
-            card.clicked.connect(self._on_card_clicked)
-            card.double_clicked.connect(self.image_activated.emit)
-            self._cards.append(card)
-            self._grid_layout.addWidget(card, row, col)
-
-        if fake_paths:
-            self._selected_path = fake_paths[0]
-            QTimer.singleShot(0, lambda: self.image_selected.emit(
-                self._selected_path, QPixmap()
-            ))
-
     # ── slots ──────────────────────────────────────────────────────────────────
     def _on_card_clicked(self, path: str) -> None:
         for card in self._cards:
@@ -1102,10 +1415,11 @@ class GalleryLoupeView(QWidget):
         self._image.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self._image, 1)
 
-    def set_image(self, path: str, pixmap: QPixmap) -> None:
+    def set_image(self, path: str, pixmap: Optional[QPixmap] = None) -> None:
         self._path = path
         self._title.setText(Path(path).name if path else "—")
-        self._pixmap = pixmap if pixmap and not pixmap.isNull() else QPixmap(path)
+        source = pixmap if pixmap and not pixmap.isNull() else _load_oriented_pixmap(path)
+        self._pixmap = source
         self._refresh_pixmap()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
@@ -1202,24 +1516,31 @@ class Filmstrip(QWidget):
 class GalleryBrowser(QWidget):
     """图库浏览界面 – embedded page inside TempusLoomWindow."""
 
+    LOUPE_PREFETCH_RADIUS = 2
+    LOUPE_CACHE_LIMIT = 7
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._current_dir: Optional[str] = None
         self._store: Optional[LibraryStore] = None
+        self._project_index = LibraryProjectIndex()
         self._assets: list[LibraryAsset] = []
         self._asset_by_path: dict[str, LibraryAsset] = {}
         self._active_folder_path: Optional[str] = None
+        self._active_tag: str = ""
         self._rating_filter_mode = "all"
         self._rating_filter_value = 0
         self._search_text = ""
         self._navigator = GalleryNavigator()
         self._current_pixmap = QPixmap()
+        self._full_pixmap_cache: dict[str, QPixmap] = {}
+        self._full_pixmap_loading: set[str] = set()
+        self._full_image_pool = QThreadPool()
+        self._full_image_pool.setMaxThreadCount(2)
         self._setup_ui()
         self._connect_signals()
         self._setup_shortcuts()
-
-        # Load sample placeholders matching the design
-        self._load_placeholders()
+        self._load_library_projects()
 
     # ── build ──────────────────────────────────────────────────────────────────
     def _setup_ui(self) -> None:
@@ -1250,8 +1571,10 @@ class GalleryBrowser(QWidget):
         grid_v.addWidget(self._grid_toolbar)
 
         self._view_stack = QStackedWidget()
+        self._project_grid = LibraryProjectGrid()
         self._grid = ThumbnailGrid()
         self._loupe = GalleryLoupeView()
+        self._view_stack.addWidget(self._project_grid)
         self._view_stack.addWidget(self._grid)
         self._view_stack.addWidget(self._loupe)
         grid_v.addWidget(self._view_stack, 1)
@@ -1266,12 +1589,19 @@ class GalleryBrowser(QWidget):
         content_layout.addWidget(self._info_panel)
 
     def _connect_signals(self) -> None:
+        self._project_grid.create_requested.connect(self._create_library_project)
+        self._project_grid.project_opened.connect(self._open_registered_library)
+        self._project_grid.project_menu_requested.connect(self._open_project_context_menu)
         self._sidebar.folder_selected.connect(self._on_folder_selected)
+        self._sidebar.tag_selected.connect(self._on_tag_selected)
+        self._info_panel.tag_selected.connect(self._on_tag_selected)
         self._grid.image_selected.connect(self._on_image_selected)
         self._grid.image_activated.connect(self._show_loupe_for_path)
         self._grid.rating_changed.connect(self._set_rating_for_path)
+        self._grid_toolbar.back_to_projects_clicked.connect(self._load_library_projects)
         self._grid_toolbar.rating_filter_changed.connect(self._set_rating_filter)
         self._info_panel.rating_changed.connect(self._set_rating_for_selected)
+        self._info_panel.tags_changed.connect(self._set_tags_for_selected)
         self._loupe.back_to_grid.connect(self._show_grid)
         self._filmstrip.image_selected.connect(self._select_path)
 
@@ -1296,10 +1626,23 @@ class GalleryBrowser(QWidget):
         return [asset.path for asset in self._assets] if self._assets else []
 
     # ── initial data ───────────────────────────────────────────────────────────
-    def _load_placeholders(self) -> None:
-        names = [f"IMG_{i:04d}.RAW" for i in range(123, 132)]
-        self._grid.load_placeholders(9, names)
-        self._grid_toolbar.update_info("风景", 24)
+    def _load_library_projects(self) -> None:
+        projects = self._project_index.list_projects()
+        self._store = None
+        self._assets = []
+        self._asset_by_path = {}
+        self._navigator.set_paths([])
+        self._full_pixmap_cache.clear()
+        self._full_pixmap_loading.clear()
+        self._project_grid.load_projects(projects)
+        self._filmstrip.load_assets([])
+        self._sidebar.set_libraries(projects, "")
+        tag_counts = [(name, str(count)) for name, count in self._project_index.global_tag_counts()]
+        self._sidebar.set_tags(tag_counts)
+        self._info_panel.set_global_tags(tag_counts, self._active_tag)
+        self._grid_toolbar.set_info_text(f"图库项目  ·  {len(projects)} 个图库")
+        self._grid_toolbar.set_project_browser_mode(True)
+        self._view_stack.setCurrentWidget(self._project_grid)
 
     # ── slots ──────────────────────────────────────────────────────────────────
     def _on_import(self) -> None:
@@ -1333,6 +1676,7 @@ class GalleryBrowser(QWidget):
         library_path = Path(library_parent) / f"{name.strip()}.tlibrary"
         try:
             self._store = LibraryStore.create(library_path, name.strip(), initial_folder=folder)
+            self._project_index.register_library(self._store.library_path)
         except Exception as exc:
             QMessageBox.warning(self, "创建图库失败", str(exc))
             return
@@ -1340,14 +1684,68 @@ class GalleryBrowser(QWidget):
         self._active_folder_path = None
         self._reload_assets()
 
+    def _open_project_context_menu(self, library_path: str, global_pos) -> None:
+        menu = QMenu(self)
+        rename_action = menu.addAction("重命名")
+        delete_action = menu.addAction("删除图库")
+        action = menu.exec(global_pos)
+        if action == rename_action:
+            self._rename_library_project(library_path)
+        elif action == delete_action:
+            self._delete_library_project(library_path)
+
+    def _rename_library_project(self, library_path: str) -> None:
+        try:
+            store = LibraryStore.open(library_path)
+            current_name = store.project_summary().name
+        except Exception as exc:
+            QMessageBox.warning(self, "重命名失败", str(exc))
+            return
+        name, ok = QInputDialog.getText(self, "重命名图库", "图库名称：", text=current_name)
+        if not ok or not name.strip():
+            store.close()
+            return
+        try:
+            store.rename_project(name.strip())
+        except Exception as exc:
+            QMessageBox.warning(self, "重命名失败", str(exc))
+        finally:
+            store.close()
+        self._load_library_projects()
+
+    def _delete_library_project(self, library_path: str) -> None:
+        result = QMessageBox.question(
+            self,
+            "删除图库",
+            "从图库列表中移除这个图库项目？磁盘上的图库文件夹不会被删除。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if result != QMessageBox.StandardButton.Yes:
+            return
+        self._project_index.unregister_library(library_path)
+        self._load_library_projects()
+
     def _open_library_project(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "打开图库项目", str(Path.home()), QFileDialog.Option.ShowDirsOnly)
         if not folder:
             return
         try:
             self._store = LibraryStore.open(folder)
+            self._project_index.register_library(self._store.library_path)
         except Exception as exc:
             QMessageBox.warning(self, "打开图库失败", str(exc))
+            return
+        self._active_folder_path = None
+        self._reload_assets()
+
+    def _open_registered_library(self, library_path: str) -> None:
+        try:
+            self._store = LibraryStore.open(library_path)
+            self._project_index.register_library(self._store.library_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "打开图库失败", str(exc))
+            self._load_library_projects()
             return
         self._active_folder_path = None
         self._reload_assets()
@@ -1385,24 +1783,31 @@ class GalleryBrowser(QWidget):
         QMessageBox.information(self, "导入完成", f"扫描 {result.scanned} 张，新增 {result.imported} 张，跳过 {result.skipped} 张。")
 
     def _on_tab_changed(self, tab: str) -> None:
-        # placeholder – extend for real recent/favorites data
-        pass
+        if gallery_tab_shows_project_browser(tab):
+            self._load_library_projects()
 
     def _on_folder_selected(self, name: str) -> None:
-        if name == "全部照片":
-            self._active_folder_path = None
-        else:
-            self._active_folder_path = name
+        if name:
+            self._open_registered_library(name)
+            return
+        self._active_folder_path = None
+        self._active_tag = ""
+        self._reload_assets()
+
+    def _on_tag_selected(self, tag: str) -> None:
+        self._active_tag = tag
+        self._active_folder_path = None
         self._reload_assets()
 
     def _on_image_selected(self, path: str, pixmap: QPixmap) -> None:
         self._navigator.select(path)
         self._current_pixmap = pixmap
         asset = self._asset_by_path.get(path)
-        self._info_panel.update_info(path, pixmap, rating=asset.rating if asset else 0)
+        tags = self._asset_tags_for_path(path)
+        self._info_panel.update_info(path, pixmap, rating=asset.rating if asset else 0, tags=tags)
         self._filmstrip.set_selected(path)
         if self._view_stack.currentWidget() == self._loupe:
-            self._loupe.set_image(path, pixmap)
+            self._show_loupe_image(path)
 
     def _set_rating_filter(self, mode: str, rating: int) -> None:
         if mode not in {"all", "minimum", "exact"}:
@@ -1427,30 +1832,81 @@ class GalleryBrowser(QWidget):
         self._grid.set_card_rating(path, rating)
         self._reload_assets(keep_selection=path)
 
+    def _set_tags_for_selected(self, tags: list[str]) -> None:
+        path = self._grid.selected_path()
+        if not path:
+            return
+        store, asset, should_close = self._store_and_asset_for_path(path)
+        if not store or not asset:
+            return
+        try:
+            store.set_asset_tags(asset.id, tags)
+        finally:
+            if should_close:
+                store.close()
+        self._reload_assets(keep_selection=path)
+
     def _reload_assets(self, *, keep_selection: Optional[str] = None) -> None:
         if not self._store:
-            self._load_placeholders()
+            self._load_library_projects()
             return
         exact_rating = self._rating_filter_value if self._rating_filter_mode == "exact" else None
         min_rating = self._rating_filter_value if self._rating_filter_mode == "minimum" else 0
-        self._assets = self._store.query_images(
-            min_rating=min_rating,
-            exact_rating=exact_rating,
-            search=self._search_text,
-            folder_path=self._active_folder_path,
-        )
+        if self._active_tag:
+            self._assets = self._project_index.query_images_by_tag(self._active_tag)
+            if self._search_text:
+                needle = self._search_text.lower()
+                self._assets = [asset for asset in self._assets if needle in asset.file_name.lower()]
+            label = f"标签：{self._active_tag}"
+        else:
+            self._assets = self._store.query_images(
+                min_rating=min_rating,
+                exact_rating=exact_rating,
+                search=self._search_text,
+                folder_path=self._active_folder_path,
+            )
+            label = self._store.project_summary().name if self._store else "图库"
         self._asset_by_path = {asset.path: asset for asset in self._assets}
+        self._prune_full_pixmap_cache()
         preferred = keep_selection or self._navigator.current_path
         selected_path = self._navigator.set_paths([asset.path for asset in self._assets], preferred_path=preferred)
         self._grid.load_assets(self._assets)
         self._filmstrip.load_assets(self._assets, selected_path=selected_path)
+        self._view_stack.setCurrentWidget(self._grid)
         if selected_path:
             self._grid.select_path(selected_path)
-        label = Path(self._active_folder_path).name if self._active_folder_path else "全部照片"
         self._grid_toolbar.update_info(label, len(self._assets))
-        folders = [("全部照片", str(len(self._store.query_images(include_missing=True))))]
-        folders.extend((folder, str(count)) for folder, count in self._store.folder_counts())
-        self._sidebar.set_folders(folders)
+        self._grid_toolbar.set_project_browser_mode(False)
+        self._sidebar.set_libraries(self._project_index.list_projects(), str(self._store.library_path))
+        tag_counts = [(name, str(count)) for name, count in self._project_index.global_tag_counts()]
+        self._sidebar.set_tags(tag_counts)
+        self._info_panel.set_global_tags(tag_counts, self._active_tag)
+
+    def _store_and_asset_for_path(self, path: str) -> tuple[Optional[LibraryStore], Optional[LibraryAsset], bool]:
+        if self._store:
+            asset = self._store.get_asset_by_path(path)
+            if asset:
+                return self._store, asset, False
+        for project in self._project_index.list_projects():
+            try:
+                store = LibraryStore.open(project.library_path)
+            except Exception:
+                continue
+            asset = store.get_asset_by_path(path)
+            if asset:
+                return store, asset, True
+            store.close()
+        return None, None, False
+
+    def _asset_tags_for_path(self, path: str) -> list[str]:
+        store, asset, should_close = self._store_and_asset_for_path(path)
+        if not store or not asset:
+            return []
+        try:
+            return store.asset_tags(asset.id)
+        finally:
+            if should_close:
+                store.close()
 
     def _select_path(self, path: str) -> None:
         if path in self._asset_by_path:
@@ -1467,11 +1923,62 @@ class GalleryBrowser(QWidget):
         if path:
             self._select_path(path)
 
+    def _show_loupe_image(self, path: str) -> None:
+        cached = self._full_pixmap_cache.get(path)
+        if cached and not cached.isNull():
+            self._loupe.set_image(path, cached)
+        else:
+            self._loupe.set_image(path, QPixmap(path))
+        self._prefetch_loupe_neighbors(path)
+
+    def _prefetch_loupe_neighbors(self, path: str) -> None:
+        targets = neighboring_paths(
+            [asset.path for asset in self._assets],
+            path,
+            radius=self.LOUPE_PREFETCH_RADIUS,
+        )
+        for target in targets:
+            if target in self._full_pixmap_cache or target in self._full_pixmap_loading:
+                continue
+            self._full_pixmap_loading.add(target)
+            loader = FullImageLoader(target)
+            loader.signals.loaded.connect(self._on_full_pixmap_loaded)
+            self._full_image_pool.start(loader)
+        self._prune_full_pixmap_cache(keep_paths=targets)
+
+    def _on_full_pixmap_loaded(self, path: str, pixmap: QPixmap) -> None:
+        self._full_pixmap_loading.discard(path)
+        if pixmap.isNull():
+            return
+        self._full_pixmap_cache[path] = pixmap
+        if self._view_stack.currentWidget() == self._loupe and self._navigator.current_path == path:
+            self._loupe.set_image(path, pixmap)
+        self._prune_full_pixmap_cache()
+
+    def _prune_full_pixmap_cache(self, keep_paths: Optional[list[str]] = None) -> None:
+        valid_paths = {asset.path for asset in self._assets}
+        keep = set(keep_paths or neighboring_paths(
+            [asset.path for asset in self._assets],
+            self._navigator.current_path,
+            radius=self.LOUPE_PREFETCH_RADIUS,
+        ))
+        for cached_path in list(self._full_pixmap_cache):
+            if cached_path not in valid_paths:
+                self._full_pixmap_cache.pop(cached_path, None)
+        if len(self._full_pixmap_cache) <= self.LOUPE_CACHE_LIMIT:
+            return
+        for cached_path in list(self._full_pixmap_cache):
+            if cached_path in keep:
+                continue
+            self._full_pixmap_cache.pop(cached_path, None)
+            if len(self._full_pixmap_cache) <= self.LOUPE_CACHE_LIMIT:
+                break
+
     def _show_loupe_for_path(self, path: str) -> None:
         if path:
             self._select_path(path)
-            self._loupe.set_image(path, self._current_pixmap)
             self._view_stack.setCurrentWidget(self._loupe)
+            self._show_loupe_image(path)
 
     def _show_grid(self) -> None:
         self._view_stack.setCurrentWidget(self._grid)

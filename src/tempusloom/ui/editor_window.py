@@ -36,7 +36,7 @@ from PyQt6.QtWidgets import (
 from .editor_icons import icon_pixmap
 from PIL import Image
 from PIL.ImageQt import ImageQt
-from tempusloom.core import Mask, TLImage
+from tempusloom.core import LibraryProjectIndex, Mask, TLImage
 from tempusloom.core.histogram_process import histogram_worker_main
 from tempusloom.agent import (
     AgentModelConfig,
@@ -5585,7 +5585,10 @@ class MainEditorWindow(QWidget):
 
     def open_image(self, path: str) -> bool:
         try:
-            tl_image = TLImage.open(path)
+            persisted = LibraryProjectIndex().load_edit_state_for_asset_path(path)
+            tl_image = TLImage.from_dict(persisted) if persisted else TLImage.open(path)
+            if str(Path(tl_image.image_path).expanduser().resolve()) != str(Path(path).expanduser().resolve()):
+                tl_image.image_path = path
             preview_max_dimension = self._preview_max_dimension()
             edited_image = tl_image.render_image(preview=True, max_dimension=preview_max_dimension)
             edited_pixmap = self._pil_to_pixmap(edited_image)
@@ -5606,6 +5609,14 @@ class MainEditorWindow(QWidget):
         self.title_changed.emit(f"TempusLoom - {Path(path).name}")
         self._status_bar.set_image_info(*tl_image.image_size())
         return True
+
+    def _persist_current_library_edit_state(self) -> None:
+        if self._current_tlimage is None:
+            return
+        LibraryProjectIndex().save_edit_state_for_asset_path(
+            self._current_tlimage.image_path,
+            self._current_tlimage.to_dict(),
+        )
 
     def _preview_max_dimension(self) -> int:
         return self._FIXED_PREVIEW_MAX_DIMENSION
@@ -5801,7 +5812,7 @@ class MainEditorWindow(QWidget):
         QMessageBox.warning(self, "Open Failed", f"Unsupported or broken image file:\n{path}")
 
     def _save_image(self) -> None:
-        pass
+        self._persist_current_library_edit_state()
 
     def _default_export_path(self) -> Path:
         if self._current_tlimage is None:
@@ -5862,6 +5873,8 @@ class MainEditorWindow(QWidget):
     def _on_export_finished(self, export_path: str) -> None:
         if self._export_progress_dialog is not None:
             self._export_progress_dialog.update_progress(100, "导出完成")
+        if self._current_tlimage is not None:
+            LibraryProjectIndex().add_tag_for_asset_path(self._current_tlimage.image_path, "导出")
 
     def _on_export_failed(self, error_message: str) -> None:
         self._pending_export_error = error_message
@@ -5918,12 +5931,14 @@ class MainEditorWindow(QWidget):
             return
         if self._current_tlimage.undo():
             self._refresh_canvas_from_tlimage(sync_panel=True)
+            self._persist_current_library_edit_state()
 
     def _redo(self) -> None:
         if self._current_tlimage is None:
             return
         if self._current_tlimage.redo():
             self._refresh_canvas_from_tlimage(sync_panel=True)
+            self._persist_current_library_edit_state()
 
     def _on_layer_visibility_changed(self, idx: int, visible: bool) -> None:
         if self._current_tlimage is None or idx >= len(self._current_tlimage.malayers):
@@ -5938,6 +5953,7 @@ class MainEditorWindow(QWidget):
         self._schedule_preview_refresh(immediate=True)
         self._request_histogram_refresh(immediate=True)
         self._right_panel.set_history_entries(self._current_tlimage.history_entries())
+        self._persist_current_library_edit_state()
 
     def _on_layer_opacity_changed(self, idx: int, opacity: float) -> None:
         if self._current_tlimage is None or idx >= len(self._current_tlimage.malayers):
@@ -5959,6 +5975,7 @@ class MainEditorWindow(QWidget):
         self._schedule_preview_refresh(immediate=True)
         self._request_histogram_refresh(immediate=True)
         self._right_panel.set_history_entries(self._current_tlimage.history_entries())
+        self._persist_current_library_edit_state()
 
     def _on_active_layer_changed(self, idx: int) -> None:
         if self._current_tlimage is None or idx < 0 or idx >= len(self._current_tlimage.malayers):
@@ -6006,6 +6023,7 @@ class MainEditorWindow(QWidget):
         self._schedule_preview_refresh(immediate=True)
         self._request_histogram_refresh(immediate=True)
         self._right_panel.set_history_entries(self._current_tlimage.history_entries())
+        self._persist_current_library_edit_state()
 
     def _on_mask_created(self, values: dict, description: str) -> None:
         if self._current_tlimage is None or not values:
@@ -6026,6 +6044,7 @@ class MainEditorWindow(QWidget):
         self._schedule_preview_refresh(immediate=True)
         self._request_histogram_refresh(immediate=True)
         self._right_panel.set_history_entries(self._current_tlimage.history_entries())
+        self._persist_current_library_edit_state()
 
     def _on_mask_changed(self, values: dict) -> None:
         if self._current_tlimage is None:
@@ -6087,6 +6106,7 @@ class MainEditorWindow(QWidget):
         self._schedule_preview_refresh(immediate=True)
         self._request_histogram_refresh(immediate=True)
         self._right_panel.set_history_entries(self._current_tlimage.history_entries())
+        self._persist_current_library_edit_state()
 
     def _active_mask_layer(self) -> Optional[Any]:
         if self._current_tlimage is None:
@@ -6135,6 +6155,7 @@ class MainEditorWindow(QWidget):
         self._schedule_preview_refresh(immediate=True)
         self._request_histogram_refresh(immediate=True)
         self._right_panel.set_history_entries(self._current_tlimage.history_entries())
+        self._persist_current_library_edit_state()
 
     def _on_canvas_color_picked(self, color: QColor) -> None:
         if self._current_tlimage is None:
@@ -6155,6 +6176,7 @@ class MainEditorWindow(QWidget):
         self._request_histogram_refresh(immediate=True)
         self._right_panel.set_history_entries(self._current_tlimage.history_entries())
         self._tool_sidebar.set_active_tool("mouse-pointer")
+        self._persist_current_library_edit_state()
 
     def _on_crop_cancelled(self) -> None:
         self._tool_sidebar.set_active_tool("mouse-pointer")
@@ -6232,6 +6254,7 @@ class MainEditorWindow(QWidget):
                     description=f"AI 调色 · {self._pending_ai_prompt[:24]}",
                 )
                 self._refresh_canvas_from_tlimage(sync_panel=True)
+                self._persist_current_library_edit_state()
                 applied = True
             except Exception as exc:
                 apply_error = str(exc)
