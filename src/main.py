@@ -10,7 +10,7 @@ TempusLoomWindow (QMainWindow)
   │     ├── [shared]  logo · divider · mode-switch
   │     ├── middle_stack  idx-0: gallery nav-tabs  │  idx-1: editor menu items
   │     ├── stretch
-  │     └── right_stack   idx-0: search+import+avatar  │  idx-1: undo/redo+save+export+avatar
+  │     └── right_stack   idx-0: search+avatar  │  idx-1: undo/redo+save+export+avatar
   └── content_stack (QStackedWidget, cross-fades)
         ├── idx-0  GalleryBrowser  (content only, no topbar)
         └── idx-1  MainEditorWindow (content only, no topbar)
@@ -26,6 +26,7 @@ Usage:
 import sys
 import os
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -40,7 +41,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QStackedWidget,
     QHBoxLayout, QVBoxLayout, QLabel, QPushButton, QLineEdit,
-    QFrame, QSizePolicy, QGraphicsOpacityEffect, QMenu,
+    QFrame, QSizePolicy, QGraphicsOpacityEffect, QMenu, QMenuBar,
 )
 
 from tempusloom.ui.styling        import apply_dark_theme
@@ -75,6 +76,18 @@ _PAGE_EDITOR  = 1
 
 
 # ── tiny helpers ───────────────────────────────────────────────────────────────
+
+def gallery_file_menu_items() -> list[Optional[str]]:
+    return [
+        "创建图库项目...",
+        "打开图库项目...",
+        None,
+        "添加文件夹到图库...",
+        "添加图片到图库...",
+        None,
+        "图库设置...",
+    ]
+
 
 def _logo_pixmap(size: int = 24) -> QPixmap:
     px = QPixmap(size, size)
@@ -139,7 +152,7 @@ class UnifiedTopBar(QWidget):
     middle_stack  idx-0: gallery nav-tabs (图库 / 最近 / 收藏)
                   idx-1: editor  menus   (文件 / 编辑 / 视图 / 插件)
 
-    right_stack   idx-0: search-box + import-btn + avatar
+    right_stack   idx-0: search-box + avatar
                   idx-1: undo + redo | save + export + avatar
     """
 
@@ -147,7 +160,11 @@ class UnifiedTopBar(QWidget):
     mode_switched          = pyqtSignal(str)   # "gallery" | "editor"
 
     gallery_tab_changed    = pyqtSignal(str)   # "图库" | "最近" | "收藏"
-    gallery_import_clicked = pyqtSignal()
+    gallery_create_library_requested = pyqtSignal()
+    gallery_open_library_requested = pyqtSignal()
+    gallery_add_folder_requested = pyqtSignal()
+    gallery_add_images_requested = pyqtSignal()
+    gallery_settings_requested = pyqtSignal()
     gallery_search_changed = pyqtSignal(str)
 
     editor_open_requested  = pyqtSignal()
@@ -229,7 +246,7 @@ class UnifiedTopBar(QWidget):
         # ── stretch ───────────────────────────────────────────────────────────
         lo.addStretch()
 
-        # ── right stack (search+import  vs  undo/redo+save+export) ────────────
+        # ── right stack (search vs undo/redo+save+export) ─────────────────────
         self._right_stack = QStackedWidget()
         self._right_stack.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
@@ -263,6 +280,8 @@ class UnifiedTopBar(QWidget):
         lo.setContentsMargins(0, 0, 0, 0)
         lo.setSpacing(0)
 
+        lo.addWidget(self._build_gallery_file_menubar())
+
         self._gallery_tabs: dict[str, QPushButton] = {}
         for name in ("图库", "最近", "收藏"):
             btn = QPushButton(name)
@@ -295,7 +314,7 @@ class UnifiedTopBar(QWidget):
 
         return w
 
-    # ── right idx-0 : gallery search + import ─────────────────────────────────
+    # ── right idx-0 : gallery search ──────────────────────────────────────────
     def _build_gallery_right(self) -> QWidget:
         w = QWidget()
         lo = QHBoxLayout(w)
@@ -305,19 +324,37 @@ class UnifiedTopBar(QWidget):
         self._search_box = QLineEdit()
         self._search_box.setObjectName("searchBox")
         self._search_box.setPlaceholderText("搜索图像...")
-        self._search_box.setFixedSize(220, 32)
+        self._search_box.setFixedSize(260, 32)
         self._search_box.textChanged.connect(self.gallery_search_changed.emit)
         lo.addWidget(self._search_box)
 
-        import_btn = QPushButton("  导入")
-        import_btn.setObjectName("importBtn")
-        import_btn.setFixedHeight(32)
-        import_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        import_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        import_btn.clicked.connect(self.gallery_import_clicked.emit)
-        lo.addWidget(import_btn)
-
         return w
+
+    def _build_gallery_file_menubar(self) -> QMenuBar:
+        menubar = QMenuBar()
+        menubar.setNativeMenuBar(False)
+        menubar.setFixedHeight(48)
+        menubar.setStyleSheet(
+            f"QMenuBar{{background:transparent; color:{C_TEXT_4}; padding:0;}}"
+            f"QMenuBar::item{{background:transparent; padding:16px 12px;}}"
+            f"QMenuBar::item:selected{{color:{C_TEXT_1}; background:transparent;}}"
+        )
+        menu = menubar.addMenu("文件")
+        menu.setStyleSheet(self._menu_style())
+        signal_by_text = {
+            "创建图库项目...": self.gallery_create_library_requested,
+            "打开图库项目...": self.gallery_open_library_requested,
+            "添加文件夹到图库...": self.gallery_add_folder_requested,
+            "添加图片到图库...": self.gallery_add_images_requested,
+            "图库设置...": self.gallery_settings_requested,
+        }
+        for item in gallery_file_menu_items():
+            if item is None:
+                menu.addSeparator()
+                continue
+            action = menu.addAction(item)
+            action.triggered.connect(signal_by_text[item].emit)
+        return menubar
 
     # ── right idx-1 : editor controls ─────────────────────────────────────────
     def _build_editor_right(self) -> QWidget:
@@ -405,15 +442,18 @@ class UnifiedTopBar(QWidget):
         return btn
 
     # ── file menu (editor) ────────────────────────────────────────────────────
-    def _show_file_menu(self) -> None:
-        menu = QMenu(self)
-        menu.setStyleSheet(
+    def _menu_style(self) -> str:
+        return (
             f"QMenu{{background:{C_BG_PANEL}; color:{C_TEXT_1};"
             f"border:1px solid {C_BORDER}; border-radius:6px; padding:4px;}}"
             f"QMenu::item{{padding:6px 20px; border-radius:4px;}}"
             f"QMenu::item:selected{{background:{C_BG_ACTIVE}; color:{C_PRIMARY};}}"
             f"QMenu::separator{{background:{C_BORDER}; height:1px; margin:4px 8px;}}"
         )
+
+    def _show_file_menu(self) -> None:
+        menu = QMenu(self)
+        menu.setStyleSheet(self._menu_style())
         menu.addAction("打开图像…").triggered.connect(self.editor_open_requested.emit)
         menu.addSeparator()
         menu.addAction("保存").triggered.connect(self.editor_save_requested.emit)
@@ -519,7 +559,11 @@ class TempusLoomWindow(QMainWindow):
         tb.mode_switched.connect(self._on_mode)
 
         # gallery-specific
-        tb.gallery_import_clicked.connect(self._gallery.trigger_import)
+        tb.gallery_create_library_requested.connect(self._gallery.create_library_project)
+        tb.gallery_open_library_requested.connect(self._gallery.open_library_project)
+        tb.gallery_add_folder_requested.connect(self._gallery.add_folder_to_library)
+        tb.gallery_add_images_requested.connect(self._gallery.add_images_to_library)
+        tb.gallery_settings_requested.connect(self._gallery.open_gallery_settings)
         tb.gallery_tab_changed.connect(self._gallery.trigger_tab)
         tb.gallery_search_changed.connect(self._gallery.filter_by_search)
 

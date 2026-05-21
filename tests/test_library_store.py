@@ -1,3 +1,4 @@
+import datetime
 import sys
 from pathlib import Path
 
@@ -6,12 +7,119 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from tempusloom.core.library_store import LibraryProjectIndex, LibraryStore
+from tempusloom.core.library_store import LibraryProjectIndex, LibraryStore, TempusLoomSettings, ThumbnailProgress
 
 
 def _write_image(path: Path, size=(20, 12), color=(120, 120, 120)) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", size, color).save(path)
+
+
+def test_settings_default_project_root_uses_hidden_tempusloom_folder(tmp_path):
+    settings = TempusLoomSettings(tmp_path / "settings.json", home_dir=tmp_path / "home")
+
+    assert settings.project_root == tmp_path / "home" / ".TempusLoom"
+    assert settings.thumbnail_cache_retention_days == 14
+
+
+def test_settings_builds_unique_library_paths_inside_project_root(tmp_path):
+    settings = TempusLoomSettings(tmp_path / "settings.json", home_dir=tmp_path / "home")
+    existing = settings.project_root / "Travel.tlibrary"
+    existing.mkdir(parents=True)
+
+    assert settings.library_path_for_name("Travel") == settings.project_root / "Travel 2.tlibrary"
+    assert settings.library_path_for_name("bad/name") == settings.project_root / "bad_name.tlibrary"
+
+
+def test_settings_migrates_project_root_and_rewrites_registered_library_paths(tmp_path):
+    old_root = tmp_path / "old-root"
+    new_root = tmp_path / "new-root"
+    source = tmp_path / "photos"
+    _write_image(source / "a.jpg")
+    settings = TempusLoomSettings(tmp_path / "settings.json", home_dir=tmp_path / "home")
+    settings.set_project_root(old_root)
+    library = LibraryStore.create(old_root / "Travel.tlibrary", "Travel", initial_folder=source)
+    index = LibraryProjectIndex(settings.index_path)
+    index.register_library(library.library_path)
+
+    settings.migrate_project_root(new_root)
+
+    migrated_library_path = new_root / "Travel.tlibrary"
+    assert not (old_root / "Travel.tlibrary").exists()
+    assert (migrated_library_path / LibraryStore.DB_NAME).is_file()
+    assert LibraryProjectIndex(settings.index_path).list_projects()[0].library_path == str(migrated_library_path)
+
+
+def test_settings_persists_thumbnail_cache_retention_days(tmp_path):
+    settings = TempusLoomSettings(tmp_path / "settings.json", home_dir=tmp_path / "home")
+
+    settings.set_thumbnail_cache_retention_days(21)
+
+    assert TempusLoomSettings(settings.settings_path, home_dir=tmp_path / "home").thumbnail_cache_retention_days == 21
+
+
+def test_library_tracks_last_opened_at_in_project_summary(tmp_path):
+    source = tmp_path / "photos"
+    _write_image(source / "a.jpg")
+    library = LibraryStore.create(tmp_path / "Library.tlibrary", "Library", initial_folder=source)
+
+    assert library.project_summary().last_opened_at == ""
+
+    library.mark_opened("2026-05-21T08:00:00+00:00")
+
+    assert LibraryStore.open(library.library_path).project_summary().last_opened_at == "2026-05-21T08:00:00+00:00"
+
+
+def test_thumbnail_cache_is_created_once_and_reused(tmp_path):
+    source = tmp_path / "photos"
+    _write_image(source / "a.jpg", size=(64, 48))
+    library = LibraryStore.create(tmp_path / "Library.tlibrary", "Library", initial_folder=source)
+    asset = library.query_images()[0]
+    progress: list[ThumbnailProgress] = []
+
+    first = library.ensure_thumbnail_cache(progress.append)
+    second = library.ensure_thumbnail_cache(progress.append)
+
+    thumb_path = library.thumbnail_path_for_asset(asset)
+    assert first.created == 1
+    assert second.created == 0
+    assert thumb_path.is_file()
+    assert progress[-1].done == progress[-1].total == 1
+
+
+def test_thumbnail_cache_path_ignores_rating_metadata_changes(tmp_path):
+    source = tmp_path / "photos"
+    _write_image(source / "a.jpg", size=(64, 48))
+    library = LibraryStore.create(tmp_path / "Library.tlibrary", "Library", initial_folder=source)
+    asset = library.query_images()[0]
+    first_path = library.thumbnail_path_for_asset(asset)
+
+    library.set_rating(asset.id, 5)
+
+    updated_asset = library.query_images()[0]
+    assert library.thumbnail_path_for_asset(updated_asset) == first_path
+
+
+def test_index_prunes_thumbnail_caches_for_stale_libraries(tmp_path):
+    stale_source = tmp_path / "stale-photos"
+    fresh_source = tmp_path / "fresh-photos"
+    _write_image(stale_source / "a.jpg")
+    _write_image(fresh_source / "b.jpg")
+    stale = LibraryStore.create(tmp_path / "Stale.tlibrary", "Stale", initial_folder=stale_source)
+    fresh = LibraryStore.create(tmp_path / "Fresh.tlibrary", "Fresh", initial_folder=fresh_source)
+    stale.ensure_thumbnail_cache()
+    fresh.ensure_thumbnail_cache()
+    index = LibraryProjectIndex(tmp_path / "library-index.sqlite")
+    index.register_library(stale.library_path)
+    index.register_library(fresh.library_path)
+    stale.mark_opened("2026-05-01T00:00:00+00:00")
+    fresh.mark_opened("2026-05-20T00:00:00+00:00")
+
+    removed = index.prune_stale_thumbnail_caches(retention_days=14, now=datetime.datetime(2026, 5, 21, tzinfo=datetime.timezone.utc))
+
+    assert removed == 1
+    assert not stale.thumbnail_cache_dir.exists()
+    assert fresh.thumbnail_cache_dir.exists()
 
 
 def test_create_library_imports_folder_and_persists_assets(tmp_path):

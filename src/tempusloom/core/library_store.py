@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 from pathlib import Path
 import random
+import re
+import shutil
 import sqlite3
 import uuid
+import hashlib
 from typing import Iterable, Optional
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 SUPPORTED_IMAGE_EXTENSIONS = {
@@ -29,6 +32,131 @@ def _utc_now() -> str:
 
 def _normalize_path(path: str | Path) -> str:
     return str(Path(path).expanduser().resolve())
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _safe_library_name(name: str) -> str:
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", name.strip())
+    safe = re.sub(r"\s+", " ", safe).strip(" .")
+    return safe or "TempusLoom Library"
+
+
+def _parse_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+class TempusLoomSettings:
+    """Persistent app settings that control where gallery projects are stored."""
+
+    def __init__(self, settings_path: str | Path | None = None, *, home_dir: str | Path | None = None) -> None:
+        self._home_dir = Path(home_dir).expanduser().resolve() if home_dir else Path.home()
+        if settings_path is None:
+            settings_path = self._home_dir / ".tempusloom" / "settings.json"
+        self.settings_path = Path(settings_path).expanduser().resolve()
+
+    @property
+    def project_root(self) -> Path:
+        data = self._read()
+        value = data.get("project_root")
+        if isinstance(value, str) and value.strip():
+            return Path(value).expanduser().resolve()
+        return self._home_dir / ".TempusLoom"
+
+    @property
+    def index_path(self) -> Path:
+        return self._home_dir / ".tempusloom" / "gallery" / LibraryProjectIndex.DB_NAME
+
+    @property
+    def thumbnail_cache_retention_days(self) -> int:
+        data = self._read()
+        value = data.get("thumbnail_cache_retention_days")
+        try:
+            days = int(value)
+        except (TypeError, ValueError):
+            return 14
+        return max(1, min(365, days))
+
+    def set_thumbnail_cache_retention_days(self, days: int) -> int:
+        safe_days = max(1, min(365, int(days)))
+        data = self._read()
+        data["thumbnail_cache_retention_days"] = safe_days
+        self._write(data)
+        return safe_days
+
+    def set_project_root(self, project_root: str | Path) -> Path:
+        root = Path(project_root).expanduser().resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        data = self._read()
+        data["project_root"] = str(root)
+        self._write(data)
+        return root
+
+    def library_path_for_name(self, name: str) -> Path:
+        root = self.project_root
+        root.mkdir(parents=True, exist_ok=True)
+        base = _safe_library_name(name)
+        candidate = root / f"{base}.tlibrary"
+        counter = 2
+        while candidate.exists():
+            candidate = root / f"{base} {counter}.tlibrary"
+            counter += 1
+        return candidate
+
+    def migrate_project_root(self, project_root: str | Path) -> Path:
+        old_root = self.project_root
+        new_root = Path(project_root).expanduser().resolve()
+        if old_root == new_root:
+            old_root.mkdir(parents=True, exist_ok=True)
+            return old_root
+        if _is_relative_to(new_root, old_root):
+            raise ValueError("新的项目保存位置不能位于旧保存位置内部。")
+
+        old_root.mkdir(parents=True, exist_ok=True)
+        new_root.mkdir(parents=True, exist_ok=True)
+        for item in old_root.iterdir():
+            target = new_root / item.name
+            if target.exists():
+                raise FileExistsError(f"目标目录已存在同名文件：{target}")
+            shutil.move(str(item), str(target))
+        try:
+            old_root.rmdir()
+        except OSError:
+            pass
+
+        LibraryProjectIndex(self.index_path).rewrite_library_root(old_root, new_root)
+        self.set_project_root(new_root)
+        return new_root
+
+    def _read(self) -> dict:
+        if not self.settings_path.is_file():
+            return {}
+        try:
+            loaded = json.loads(self.settings_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    def _write(self, data: dict) -> None:
+        self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+        self.settings_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
 
 
 @dataclass(frozen=True)
@@ -56,6 +184,24 @@ class ImportResult:
 
 
 @dataclass(frozen=True)
+class ThumbnailProgress:
+    total: int
+    done: int
+    created: int
+    skipped: int
+    failed: int
+    current_path: str = ""
+
+
+@dataclass(frozen=True)
+class ThumbnailCacheResult:
+    total: int = 0
+    created: int = 0
+    skipped: int = 0
+    failed: int = 0
+
+
+@dataclass(frozen=True)
 class LibraryProject:
     name: str
     library_path: str
@@ -65,12 +211,14 @@ class LibraryProject:
     cover_paths: tuple[str, ...]
     created_at: str
     updated_at: str
+    last_opened_at: str = ""
 
 
 class LibraryStore:
     """SQLite-backed photo library project store."""
 
     DB_NAME = "library.sqlite"
+    THUMBNAIL_SIZE = (360, 260)
 
     def __init__(self, library_path: str | Path) -> None:
         self.library_path = Path(library_path).expanduser().resolve()
@@ -112,6 +260,10 @@ class LibraryStore:
     def close(self) -> None:
         self._conn.close()
 
+    @property
+    def thumbnail_cache_dir(self) -> Path:
+        return self.library_path / "cache" / "thumbnails"
+
     def _ensure_schema(self) -> None:
         self._conn.executescript(
             """
@@ -120,7 +272,8 @@ class LibraryStore:
               name TEXT NOT NULL,
               root_path TEXT,
               created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
+              updated_at TEXT NOT NULL,
+              last_opened_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS import_source (
@@ -177,7 +330,14 @@ class LibraryStore:
             CREATE INDEX IF NOT EXISTS idx_image_tag_tag ON image_tag(tag_id);
             """
         )
+        self._ensure_column("library_project", "last_opened_at", "TEXT")
         self._conn.commit()
+
+    def _ensure_column(self, table: str, column: str, definition: str) -> None:
+        rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        if any(str(row["name"]) == column for row in rows):
+            return
+        self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def _upsert_project(self, *, name: str, root_path: str | Path | None = None) -> None:
         now = _utc_now()
@@ -211,6 +371,22 @@ class LibraryStore:
             self._conn.commit()
         else:
             self._upsert_project(name=clean_name)
+
+    def mark_opened(self, opened_at: str | None = None) -> None:
+        value = opened_at or _utc_now()
+        row = self._conn.execute("SELECT id FROM library_project LIMIT 1").fetchone()
+        if row:
+            self._conn.execute(
+                "UPDATE library_project SET last_opened_at = ? WHERE id = ?",
+                (value, row["id"]),
+            )
+        else:
+            self._upsert_project(name=self.library_path.stem)
+            self._conn.execute(
+                "UPDATE library_project SET last_opened_at = ?",
+                (value,),
+            )
+        self._conn.commit()
 
     def add_folder(self, folder_path: str | Path, *, recursive: bool = True) -> ImportResult:
         folder = Path(folder_path).expanduser().resolve()
@@ -298,6 +474,69 @@ class LibraryStore:
     def _read_dimensions(path: Path) -> tuple[Optional[int], Optional[int]]:
         with Image.open(path) as image:
             return int(image.width), int(image.height)
+
+    def thumbnail_path_for_asset(self, asset: LibraryAsset) -> Path:
+        source = Path(asset.path)
+        try:
+            mtime_ns = source.stat().st_mtime_ns
+        except OSError:
+            mtime_ns = 0
+        digest = hashlib.sha1(f"{asset.path}|{asset.file_size}|{mtime_ns}".encode("utf-8")).hexdigest()[:16]
+        key = f"{asset.id}-{digest}.jpg"
+        return self.thumbnail_cache_dir / source.suffix.lower().lstrip(".") / key
+
+    def ensure_thumbnail_cache(
+        self,
+        progress_callback=None,
+        *,
+        width: int | None = None,
+        height: int | None = None,
+    ) -> ThumbnailCacheResult:
+        assets = self.query_images(include_missing=False)
+        total = len(assets)
+        created = skipped = failed = 0
+        thumb_w = width or self.THUMBNAIL_SIZE[0]
+        thumb_h = height or self.THUMBNAIL_SIZE[1]
+        for index, asset in enumerate(assets, start=1):
+            target = self.thumbnail_path_for_asset(asset)
+            if target.is_file():
+                skipped += 1
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    self._write_thumbnail(Path(asset.path), target, thumb_w, thumb_h)
+                    created += 1
+                except Exception:
+                    failed += 1
+            if progress_callback is not None:
+                progress_callback(
+                    ThumbnailProgress(
+                        total=total,
+                        done=index,
+                        created=created,
+                        skipped=skipped,
+                        failed=failed,
+                        current_path=asset.path,
+                    )
+                )
+        return ThumbnailCacheResult(total=total, created=created, skipped=skipped, failed=failed)
+
+    def clear_thumbnail_cache(self) -> bool:
+        if not self.thumbnail_cache_dir.exists():
+            return False
+        shutil.rmtree(self.thumbnail_cache_dir)
+        return True
+
+    @staticmethod
+    def _write_thumbnail(source: Path, target: Path, width: int, height: int) -> None:
+        with Image.open(source) as image:
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            image.thumbnail((width, height), Image.Resampling.LANCZOS)
+            canvas = Image.new("RGB", (width, height), (30, 30, 30))
+            x = (width - image.width) // 2
+            y = (height - image.height) // 2
+            canvas.paste(image, (x, y))
+            canvas.save(target, format="JPEG", quality=82, optimize=True)
 
     def query_images(
         self,
@@ -501,7 +740,7 @@ class LibraryStore:
     def project_summary(self) -> LibraryProject:
         row = self._conn.execute(
             """
-            SELECT name, root_path, created_at, updated_at
+            SELECT name, root_path, created_at, updated_at, last_opened_at
             FROM library_project
             ORDER BY updated_at DESC
             LIMIT 1
@@ -515,6 +754,7 @@ class LibraryStore:
         root_path = str(row["root_path"]) if row and row["root_path"] else None
         created_at = str(row["created_at"]) if row else ""
         updated_at = str(row["updated_at"]) if row else ""
+        last_opened_at = str(row["last_opened_at"]) if row and row["last_opened_at"] else ""
         return LibraryProject(
             name=name,
             library_path=str(self.library_path),
@@ -524,6 +764,7 @@ class LibraryStore:
             cover_paths=cover_paths,
             created_at=created_at,
             updated_at=updated_at,
+            last_opened_at=last_opened_at,
         )
 
     @staticmethod
@@ -558,7 +799,7 @@ class LibraryProjectIndex:
 
     @staticmethod
     def default_path() -> Path:
-        return Path.home() / ".tempusloom" / "gallery" / LibraryProjectIndex.DB_NAME
+        return TempusLoomSettings().index_path
 
     def close(self) -> None:
         self._conn.close()
@@ -590,6 +831,12 @@ class LibraryProjectIndex:
             (normalized, now, now),
         )
         self._conn.commit()
+        try:
+            store = LibraryStore.open(normalized)
+            store.mark_opened(now)
+            store.close()
+        except Exception:
+            pass
 
     def unregister_library(self, library_path: str | Path) -> None:
         self._conn.execute(
@@ -597,6 +844,34 @@ class LibraryProjectIndex:
             (_normalize_path(library_path),),
         )
         self._conn.commit()
+
+    def rewrite_library_root(self, old_root: str | Path, new_root: str | Path) -> None:
+        old_base = Path(old_root).expanduser().resolve()
+        new_base = Path(new_root).expanduser().resolve()
+        rows = self._conn.execute("SELECT library_path FROM library_registry").fetchall()
+        for row in rows:
+            old_path = Path(str(row["library_path"])).expanduser().resolve()
+            if not _is_relative_to(old_path, old_base):
+                continue
+            new_path = new_base / old_path.relative_to(old_base)
+            self._conn.execute(
+                "UPDATE library_registry SET library_path = ? WHERE library_path = ?",
+                (str(new_path), str(old_path)),
+            )
+        self._conn.commit()
+
+    def prune_stale_thumbnail_caches(self, retention_days: int, *, now: datetime | None = None) -> int:
+        cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=max(1, int(retention_days)))
+        removed = 0
+        for store in self._open_registered_stores():
+            try:
+                summary = store.project_summary()
+                opened_at = _parse_datetime(summary.last_opened_at or summary.updated_at or summary.created_at)
+                if opened_at and opened_at < cutoff and store.clear_thumbnail_cache():
+                    removed += 1
+            finally:
+                store.close()
+        return removed
 
     def list_projects(self) -> list[LibraryProject]:
         rows = self._conn.execute(

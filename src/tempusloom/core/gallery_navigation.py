@@ -1,8 +1,32 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 
 def gallery_tab_shows_project_browser(tab: str) -> bool:
     return tab == "图库"
+
+
+def gallery_add_slot_items() -> list[str]:
+    return ["添加图片到图库...", "添加文件夹到图库..."]
+
+
+def split_gallery_import_paths(paths) -> tuple[list[Path], list[Path]]:
+    files: list[Path] = []
+    folders: list[Path] = []
+    for path in paths:
+        item = Path(path).expanduser()
+        if item.is_file():
+            files.append(item)
+        elif item.is_dir():
+            folders.append(item)
+    return files, folders
+
+
+def tag_filter_matches(tags: list[str], active_tag: str) -> bool:
+    if not active_tag:
+        return True
+    return active_tag in tags
 
 
 def neighboring_paths(paths: list[str], current_path: str, *, radius: int = 2) -> list[str]:

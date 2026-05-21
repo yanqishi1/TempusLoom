@@ -25,7 +25,16 @@ from .malayer import (
 )
 from .tl_image import TLImage
 from .gallery_navigation import GalleryNavigator
-from .library_store import ImportResult, LibraryAsset, LibraryProject, LibraryProjectIndex, LibraryStore
+from .library_store import (
+    ImportResult,
+    LibraryAsset,
+    LibraryProject,
+    LibraryProjectIndex,
+    LibraryStore,
+    TempusLoomSettings,
+    ThumbnailCacheResult,
+    ThumbnailProgress,
+)
 
 __all__ = [
     "AdjustmentMalayer",
@@ -52,6 +61,9 @@ __all__ = [
     "LibraryProject",
     "LibraryProjectIndex",
     "LibraryStore",
+    "TempusLoomSettings",
+    "ThumbnailCacheResult",
+    "ThumbnailProgress",
     "TLImage",
     "ToneParams",
     "WhiteBalanceParams",

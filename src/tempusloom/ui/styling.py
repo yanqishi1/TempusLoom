@@ -123,18 +123,6 @@ QScrollBar:horizontal {{ height: 0; }}
     color: {TEXT_PRIMARY};
 }}
 
-/* ── import button ────────────────────────────────────────────────────────── */
-#importBtn {{
-    background-color: {PRIMARY};
-    color: {TEXT_WHITE};
-    border-radius: 6px;
-    font-size: 13px;
-    font-weight: 500;
-    padding: 6px 14px;
-}}
-#importBtn:hover {{ background-color: {PRIMARY_HOVER}; }}
-#importBtn:pressed {{ background-color: #2855cc; }}
-
 /* ── sidebar ──────────────────────────────────────────────────────────────── */
 #sidebar {{
     background-color: {BG_PANEL};
