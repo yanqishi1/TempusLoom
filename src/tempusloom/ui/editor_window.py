@@ -23,7 +23,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QColor, QPainter, QPainterPath, QBrush, QPen,
     QPixmap, QFont, QLinearGradient, QRadialGradient, QWheelEvent,
-    QMouseEvent, QKeySequence, QAction, QCursor,
+    QMouseEvent, QKeySequence, QAction, QCursor, QIcon, QImage,
 )
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
@@ -34,9 +34,10 @@ from PyQt6.QtWidgets import (
 )
 
 from .editor_icons import icon_pixmap
-from PIL import Image
+from PIL import Image, ImageOps
 from PIL.ImageQt import ImageQt
 from tempusloom.core import LibraryProjectIndex, Mask, TLImage
+from tempusloom.core.library_store import LibraryAsset, LibraryStore
 from tempusloom.core.histogram_process import histogram_worker_main
 from tempusloom.agent import (
     AgentModelConfig,
@@ -70,6 +71,14 @@ C_ICON_DEF  = C_TEXT_4
 
 
 # ── tiny helpers ───────────────────────────────────────────────────────────────
+
+def editor_side_panel_order(*, ai_visible: bool = True) -> list[str]:
+    order: list[str] = []
+    if ai_visible:
+        order.append("ai_chat")
+    order.append("right_panel")
+    return order
+
 
 def _lbl(text: str, color: str = C_TEXT_3, size: int = 12,
          weight: QFont.Weight = QFont.Weight.Normal) -> QLabel:
@@ -125,6 +134,17 @@ def _logo_pixmap(size: int = 24) -> QPixmap:
     p.drawText(QRectF(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, "T")
     p.end()
     return px
+
+
+def _load_oriented_pixmap(path: str) -> QPixmap:
+    try:
+        with Image.open(path) as image:
+            image = ImageOps.exif_transpose(image).convert("RGBA")
+            data = image.tobytes("raw", "RGBA")
+            qimage = QImage(data, image.width, image.height, QImage.Format.Format_RGBA8888)
+            return QPixmap.fromImage(qimage.copy())
+    except Exception:
+        return QPixmap(path)
 
 
 def _hline() -> QFrame:
@@ -660,6 +680,7 @@ class CanvasArea(QWidget):
     mask_preview_changed = pyqtSignal(dict)
     mask_create_finished = pyqtSignal(dict, str)
     mask_change_finished = pyqtSignal(dict, str)
+    filmstrip_shortcut_pressed = pyqtSignal(int)
 
     _MIN_ZOOM = 5
     _MAX_ZOOM = 800
@@ -1720,6 +1741,14 @@ class CanvasArea(QWidget):
                 self._cancel_crop()
                 event.accept()
                 return
+        if Qt.Key.Key_0 <= event.key() <= Qt.Key.Key_5:
+            self.filmstrip_shortcut_pressed.emit(event.key())
+            event.accept()
+            return
+        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            self.filmstrip_shortcut_pressed.emit(event.key())
+            event.accept()
+            return
         super().keyPressEvent(event)
 
     # ── drag-drop ─────────────────────────────────────────────────────────────
@@ -1795,6 +1824,221 @@ class EditorStatusBar(QWidget):
         self._size_lbl.setText(f"{width} × {height} px")
 
 
+class EditorStarRating(QWidget):
+    rating_changed = pyqtSignal(int)
+
+    def __init__(self, rating: int = 0, parent=None) -> None:
+        super().__init__(parent)
+        self._rating = 0
+        self._buttons: list[QPushButton] = []
+        lo = QHBoxLayout(self)
+        lo.setContentsMargins(0, 0, 0, 0)
+        lo.setSpacing(0)
+        for value in range(1, 6):
+            btn = QPushButton()
+            btn.setFixedSize(18, 18)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.clicked.connect(lambda _checked=False, v=value: self.set_rating(v, emit=True))
+            self._buttons.append(btn)
+            lo.addWidget(btn)
+        self.set_rating(rating)
+
+    def set_rating(self, rating: int, *, emit: bool = False) -> None:
+        self._rating = max(0, min(5, int(rating)))
+        for index, btn in enumerate(self._buttons, start=1):
+            active = index <= self._rating
+            btn.setText("★" if active else "☆")
+            btn.setStyleSheet(
+                "QPushButton{background:transparent; border:none; "
+                f"color:{'#FBBF24' if active else C_TEXT_4}; font-size:14px; padding:0;}}"
+            )
+        if emit:
+            self.rating_changed.emit(self._rating)
+
+
+class EditorFilmstrip(QWidget):
+    image_selected = pyqtSignal(str)
+    rating_changed = pyqtSignal(str, int)
+    tags_changed = pyqtSignal(list)
+    rating_filter_changed = pyqtSignal(str, int)
+    tag_filter_changed = pyqtSignal(str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(136)
+        self.setStyleSheet(f"background:{C_BG_PANEL}; border-top:1px solid {C_BORDER};")
+        self._current_path = ""
+        self._buttons: dict[str, QPushButton] = {}
+        self._assets_by_path: dict[str, LibraryAsset] = {}
+        self._updating_tags = False
+        self._build()
+
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 6, 8, 6)
+        root.setSpacing(6)
+
+        controls = QWidget()
+        controls_lo = QHBoxLayout(controls)
+        controls_lo.setContentsMargins(0, 0, 0, 0)
+        controls_lo.setSpacing(8)
+
+        self._info_lbl = _lbl("图库胶片条", C_TEXT_2, 11)
+        controls_lo.addWidget(self._info_lbl)
+        controls_lo.addStretch()
+
+        self._rating_filter_btn = QPushButton("全部星级 ▾")
+        self._rating_filter_btn.setFixedHeight(26)
+        self._rating_filter_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._rating_filter_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._rating_filter_btn.setStyleSheet(self._chip_qss())
+        self._rating_filter_btn.clicked.connect(self._open_rating_filter_menu)
+        controls_lo.addWidget(self._rating_filter_btn)
+
+        self._tag_filter = QComboBox()
+        self._tag_filter.setFixedSize(148, 26)
+        self._tag_filter.setStyleSheet(
+            f"QComboBox{{background:{C_BG_ITEM}; color:{C_TEXT_2}; border:none;"
+            f"border-radius:6px; padding:0 8px; font-size:11px;}}"
+        )
+        self._tag_filter.currentIndexChanged.connect(self._emit_tag_filter_changed)
+        controls_lo.addWidget(self._tag_filter)
+
+        self._rating_widget = EditorStarRating(0)
+        self._rating_widget.rating_changed.connect(self._emit_current_rating_changed)
+        controls_lo.addWidget(self._rating_widget)
+
+        self._tag_edit = QLineEdit()
+        self._tag_edit.setFixedWidth(190)
+        self._tag_edit.setPlaceholderText("标签")
+        self._tag_edit.setStyleSheet(
+            f"QLineEdit{{background:{C_BG_APP}; color:{C_TEXT_1}; border:1px solid {C_BORDER};"
+            f"border-radius:6px; padding:0 8px; font-size:11px;}}"
+        )
+        self._tag_edit.editingFinished.connect(self._emit_tags_changed)
+        controls_lo.addWidget(self._tag_edit)
+        root.addWidget(controls)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet("background:transparent; border:none;")
+        self._content = QWidget()
+        self._layout = QHBoxLayout(self._content)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(8)
+        self._scroll.setWidget(self._content)
+        root.addWidget(self._scroll, 1)
+
+    @staticmethod
+    def _chip_qss() -> str:
+        return (
+            f"QPushButton{{background:{C_BG_ITEM}; color:{C_TEXT_2}; border:none;"
+            f"border-radius:6px; padding:0 10px; font-size:11px;}}"
+            f"QPushButton:hover{{background:#363636; color:{C_TEXT_1};}}"
+        )
+
+    def load_assets(self, assets: list[LibraryAsset], current_path: str = "") -> None:
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.setParent(None)
+        self._buttons.clear()
+        self._assets_by_path = {asset.path: asset for asset in assets}
+        self._info_lbl.setText(f"图库胶片条 · {len(assets)} 张")
+        for index, asset in enumerate(assets):
+            btn = QPushButton()
+            btn.setFixedSize(88, 64)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setToolTip(asset.file_name)
+            btn.clicked.connect(lambda _checked=False, p=asset.path: self.image_selected.emit(p))
+            pixmap = _load_oriented_pixmap(asset.path)
+            if pixmap.isNull():
+                pixmap = QPixmap(88, 64)
+                pixmap.fill(QColor("#303030"))
+            else:
+                pixmap = pixmap.scaled(
+                    88,
+                    64,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                pixmap = pixmap.copy(max(0, (pixmap.width() - 88) // 2), max(0, (pixmap.height() - 64) // 2), 88, 64)
+            btn.setIcon(QIcon(pixmap))
+            btn.setIconSize(QSize(88, 64))
+            self._buttons[asset.path] = btn
+            self._layout.addWidget(btn)
+        self._layout.addStretch()
+        self.set_current_path(current_path)
+
+    def set_current_path(self, path: str) -> None:
+        self._current_path = path
+        for button_path, button in self._buttons.items():
+            border = f"2px solid {C_PRIMARY}" if button_path == path else f"1px solid {C_BORDER}"
+            button.setStyleSheet(f"QPushButton{{background:{C_BG_ITEM}; border:{border}; border-radius:6px; padding:0;}}")
+
+    def set_current_metadata(self, rating: int, tags: list[str]) -> None:
+        self._rating_widget.set_rating(rating)
+        self._updating_tags = True
+        self._tag_edit.setText("，".join(tags))
+        self._updating_tags = False
+
+    def set_rating_filter(self, mode: str, rating: int) -> None:
+        if mode == "exact":
+            self._rating_filter_btn.setText(f"正好 {rating} 星 ▾")
+        elif mode == "minimum" and rating > 0:
+            self._rating_filter_btn.setText(f"{rating} 星及以上 ▾")
+        else:
+            self._rating_filter_btn.setText("全部星级 ▾")
+
+    def set_tag_options(self, tags: list[tuple[str, int]], active_tag: str = "") -> None:
+        self._tag_filter.blockSignals(True)
+        self._tag_filter.clear()
+        self._tag_filter.addItem("全部标签", "")
+        for name, count in tags:
+            self._tag_filter.addItem(f"{name} ({count})", name)
+        index = self._tag_filter.findData(active_tag)
+        self._tag_filter.setCurrentIndex(index if index >= 0 else 0)
+        self._tag_filter.blockSignals(False)
+
+    def _emit_current_rating_changed(self, rating: int) -> None:
+        if self._current_path:
+            self.rating_changed.emit(self._current_path, rating)
+
+    def _emit_tags_changed(self) -> None:
+        if self._updating_tags:
+            return
+        tags: list[str] = []
+        seen: set[str] = set()
+        for chunk in self._tag_edit.text().replace("，", ",").split(","):
+            name = chunk.strip()
+            if name and name not in seen:
+                seen.add(name)
+                tags.append(name)
+        self.tags_changed.emit(tags)
+
+    def _emit_tag_filter_changed(self) -> None:
+        self.tag_filter_changed.emit(str(self._tag_filter.currentData() or ""))
+
+    def _open_rating_filter_menu(self) -> None:
+        menu = QMenu(self)
+        menu.addAction("全部星级").triggered.connect(lambda _checked=False: self.rating_filter_changed.emit("all", 0))
+        minimum_menu = menu.addMenu("至少")
+        for rating in range(1, 6):
+            action = minimum_menu.addAction(f"{rating} 星及以上")
+            action.triggered.connect(lambda _checked=False, r=rating: self.rating_filter_changed.emit("minimum", r))
+        exact_menu = menu.addMenu("正好")
+        for rating in range(0, 6):
+            label = "0 星（未评级）" if rating == 0 else f"{rating} 星"
+            action = exact_menu.addAction(label)
+            action.triggered.connect(lambda _checked=False, r=rating: self.rating_filter_changed.emit("exact", r))
+        menu.exec(self._rating_filter_btn.mapToGlobal(self._rating_filter_btn.rect().bottomLeft()))
+
+
 class ChatInputEdit(QPlainTextEdit):
     submit_requested = pyqtSignal()
 
@@ -1812,15 +2056,15 @@ class ChatInputEdit(QPlainTextEdit):
 class AIChatBox(QWidget):
     request_submitted = pyqtSignal(str)
     settings_requested = pyqtSignal()
+    visibility_toggle_requested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._busy = False
         self._latest_json_text = ""
-        self.setFixedHeight(228)
-        self.setStyleSheet(
-            f"background:{C_BG_PANEL}; border-top:1px solid {C_BORDER};"
-        )
+        self.setFixedWidth(320)
+        self.setMinimumWidth(300)
+        self.setStyleSheet(f"background:{C_BG_PANEL}; border-left:1px solid {C_BORDER};")
         self._build()
         self.clear_conversation()
 
@@ -1848,6 +2092,17 @@ class AIChatBox(QWidget):
         )
         self._settings_btn.clicked.connect(self.settings_requested.emit)
 
+        self._hide_btn = QPushButton("隐藏")
+        self._hide_btn.setFixedHeight(26)
+        self._hide_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._hide_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._hide_btn.setStyleSheet(
+            f"QPushButton{{background:transparent; color:{C_TEXT_3}; border:none;"
+            f"border-radius:6px; padding:0 10px; font-size:11px;}}"
+            f"QPushButton:hover{{background:{C_BG_ITEM}; color:{C_TEXT_1};}}"
+        )
+        self._hide_btn.clicked.connect(self.visibility_toggle_requested.emit)
+
         self._copy_btn = QPushButton("复制 JSON")
         self._copy_btn.setFixedHeight(26)
         self._copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1873,13 +2128,19 @@ class AIChatBox(QWidget):
         self._clear_btn.clicked.connect(self.clear_conversation)
 
         header_lo.addWidget(title)
-        header_lo.addWidget(self._status_lbl)
         header_lo.addStretch()
-        header_lo.addWidget(self._context_lbl)
         header_lo.addWidget(self._settings_btn)
-        header_lo.addWidget(self._copy_btn)
-        header_lo.addWidget(self._clear_btn)
+        header_lo.addWidget(self._hide_btn)
         lo.addWidget(header)
+
+        meta = QWidget()
+        meta_lo = QHBoxLayout(meta)
+        meta_lo.setContentsMargins(0, 0, 0, 0)
+        meta_lo.setSpacing(6)
+        meta_lo.addWidget(self._status_lbl)
+        meta_lo.addStretch()
+        meta_lo.addWidget(self._context_lbl)
+        lo.addWidget(meta)
 
         self._thread_scroll = QScrollArea()
         self._thread_scroll.setWidgetResizable(True)
@@ -1956,12 +2217,20 @@ class AIChatBox(QWidget):
         )
         self._send_btn.clicked.connect(self._submit)
 
-        footer_lo.addWidget(self._mode_combo)
-        footer_lo.addWidget(self._model_btn)
-        footer_lo.addWidget(self._effort_combo)
-        footer_lo.addStretch()
+        footer_lo.addWidget(self._model_btn, 1)
         footer_lo.addWidget(self._send_btn)
         lo.addWidget(footer)
+
+        utility = QWidget()
+        utility_lo = QHBoxLayout(utility)
+        utility_lo.setContentsMargins(0, 0, 0, 0)
+        utility_lo.setSpacing(8)
+        utility_lo.addWidget(self._mode_combo)
+        utility_lo.addWidget(self._effort_combo)
+        utility_lo.addStretch()
+        utility_lo.addWidget(self._copy_btn)
+        utility_lo.addWidget(self._clear_btn)
+        lo.addWidget(utility)
 
     @staticmethod
     def _pill_combo_qss() -> str:
@@ -5502,6 +5771,11 @@ class MainEditorWindow(QWidget):
         self._latest_histogram_job_id = 0
         self._original_preview_cache_key: Optional[tuple[str, int]] = None
         self._original_preview_pixmap: Optional[QPixmap] = None
+        self._filmstrip_store: Optional[LibraryStore] = None
+        self._filmstrip_assets: list[LibraryAsset] = []
+        self._filmstrip_rating_filter_mode = "all"
+        self._filmstrip_rating_filter_value = 0
+        self._filmstrip_tag_filter = ""
         self.setStyleSheet(f"background:{C_BG_APP};")
         self._build_ui()
         self._connect_signals()
@@ -5540,12 +5814,27 @@ class MainEditorWindow(QWidget):
         self._canvas     = CanvasArea()
         self._ai_chatbox = AIChatBox()
         self._status_bar = EditorStatusBar()
+        self._filmstrip = EditorFilmstrip()
+        self._ai_reveal_btn = QPushButton("AI")
+        self._ai_reveal_btn.setFixedWidth(34)
+        self._ai_reveal_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._ai_reveal_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._ai_reveal_btn.setToolTip("显示 AI 调色助手")
+        self._ai_reveal_btn.setStyleSheet(
+            f"QPushButton{{background:{C_BG_PANEL}; color:{C_TEXT_2}; border-left:1px solid {C_BORDER};"
+            f"border-right:1px solid {C_BORDER}; padding:0; font-size:12px; font-weight:600;}}"
+            f"QPushButton:hover{{background:{C_BG_ITEM}; color:{C_TEXT_1};}}"
+        )
+        self._ai_reveal_btn.hide()
+        self._ai_reveal_btn.clicked.connect(self._show_ai_chat_column)
 
         center_lo.addWidget(self._opts_bar)
         center_lo.addWidget(self._canvas, 1)
-        center_lo.addWidget(self._ai_chatbox)
-        center_lo.addWidget(self._status_bar)
+        center_lo.addWidget(self._filmstrip)
         content_lo.addWidget(center, 1)
+
+        content_lo.addWidget(self._ai_reveal_btn)
+        content_lo.addWidget(self._ai_chatbox)
 
         # right panel
         self._right_panel = RightPanel()
@@ -5564,10 +5853,17 @@ class MainEditorWindow(QWidget):
         self._canvas.mask_preview_changed.connect(self._on_mask_changed)
         self._canvas.mask_create_finished.connect(self._on_mask_created)
         self._canvas.mask_change_finished.connect(self._on_mask_change_finished)
+        self._canvas.filmstrip_shortcut_pressed.connect(self._handle_filmstrip_shortcut_key)
         self._status_bar.zoom_in_requested.connect(self._zoom_in)
         self._status_bar.zoom_out_requested.connect(self._zoom_out)
         self._ai_chatbox.request_submitted.connect(self._on_ai_chat_requested)
         self._ai_chatbox.settings_requested.connect(self._open_ai_settings_dialog)
+        self._ai_chatbox.visibility_toggle_requested.connect(self._hide_ai_chat_column)
+        self._filmstrip.image_selected.connect(self._open_filmstrip_image)
+        self._filmstrip.rating_changed.connect(self._set_filmstrip_rating)
+        self._filmstrip.tags_changed.connect(self._set_filmstrip_tags_for_current)
+        self._filmstrip.rating_filter_changed.connect(self._set_filmstrip_rating_filter)
+        self._filmstrip.tag_filter_changed.connect(self._set_filmstrip_tag_filter)
 
         self._opts_bar.grid_toggled.connect(self._canvas.set_grid)
         self._opts_bar.ruler_toggled.connect(self._canvas.set_ruler)
@@ -5582,6 +5878,14 @@ class MainEditorWindow(QWidget):
         self._right_panel.mask_adjust_section_changed.connect(self._on_mask_adjust_section_changed)
         self._right_panel.mask_adjust_section_change_finished.connect(self._on_mask_adjust_section_change_finished)
         self._right_panel.mask_layer_selected.connect(self._on_mask_layer_selected)
+
+    def _hide_ai_chat_column(self) -> None:
+        self._ai_chatbox.hide()
+        self._ai_reveal_btn.show()
+
+    def _show_ai_chat_column(self) -> None:
+        self._ai_reveal_btn.hide()
+        self._ai_chatbox.show()
 
     def open_image(self, path: str) -> bool:
         try:
@@ -5608,6 +5912,7 @@ class MainEditorWindow(QWidget):
         self._request_histogram_refresh(immediate=True)
         self.title_changed.emit(f"TempusLoom - {Path(path).name}")
         self._status_bar.set_image_info(*tl_image.image_size())
+        self._load_filmstrip_for_image(path)
         return True
 
     def _persist_current_library_edit_state(self) -> None:
@@ -5617,6 +5922,128 @@ class MainEditorWindow(QWidget):
             self._current_tlimage.image_path,
             self._current_tlimage.to_dict(),
         )
+
+    def _load_filmstrip_for_image(self, path: str) -> None:
+        if self._filmstrip_store is not None:
+            self._filmstrip_store.close()
+            self._filmstrip_store = None
+        store, asset = LibraryProjectIndex().open_store_and_asset_by_path(path)
+        if not store or not asset:
+            self._filmstrip_assets = []
+            self._filmstrip.load_assets([], "")
+            self._filmstrip.set_tag_options([])
+            self._filmstrip.set_current_metadata(0, [])
+            return
+        self._filmstrip_store = store
+        self._reload_filmstrip_assets(current_path=asset.path)
+        self._sync_filmstrip_current_metadata(asset.path)
+
+    def _reload_filmstrip_assets(self, *, current_path: str = "") -> None:
+        if not self._filmstrip_store:
+            return
+        exact_rating = self._filmstrip_rating_filter_value if self._filmstrip_rating_filter_mode == "exact" else None
+        min_rating = self._filmstrip_rating_filter_value if self._filmstrip_rating_filter_mode == "minimum" else 0
+        self._filmstrip_assets = self._filmstrip_store.query_images(
+            min_rating=min_rating,
+            exact_rating=exact_rating,
+            tag=self._filmstrip_tag_filter or None,
+        )
+        self._filmstrip.load_assets(self._filmstrip_assets, current_path)
+        self._filmstrip.set_rating_filter(self._filmstrip_rating_filter_mode, self._filmstrip_rating_filter_value)
+        self._filmstrip.set_tag_options(self._filmstrip_store.tag_counts(), self._filmstrip_tag_filter)
+
+    def _sync_filmstrip_current_metadata(self, path: str) -> None:
+        if not self._filmstrip_store:
+            self._filmstrip.set_current_metadata(0, [])
+            return
+        asset = self._filmstrip_store.get_asset_by_path(path)
+        if not asset:
+            self._filmstrip.set_current_metadata(0, [])
+            return
+        self._filmstrip.set_current_path(asset.path)
+        self._filmstrip.set_current_metadata(asset.rating, self._filmstrip_store.asset_tags(asset.id))
+
+    def _open_filmstrip_image(self, path: str) -> None:
+        if not path:
+            return
+        self._persist_current_library_edit_state()
+        self.open_image(path)
+
+    def _set_filmstrip_rating(self, path: str, rating: int) -> None:
+        if not self._filmstrip_store:
+            return
+        asset = self._filmstrip_store.get_asset_by_path(path)
+        if not asset:
+            return
+        self._filmstrip_store.set_rating(asset.id, rating)
+        current_path = self._current_tlimage.image_path if self._current_tlimage else path
+        self._reload_filmstrip_assets(current_path=current_path)
+        self._sync_filmstrip_current_metadata(current_path)
+
+    def _set_filmstrip_tags_for_current(self, tags: list[str]) -> None:
+        if not self._filmstrip_store or self._current_tlimage is None:
+            return
+        asset = self._filmstrip_store.get_asset_by_path(self._current_tlimage.image_path)
+        if not asset:
+            return
+        self._filmstrip_store.set_asset_tags(asset.id, tags)
+        self._reload_filmstrip_assets(current_path=asset.path)
+        self._sync_filmstrip_current_metadata(asset.path)
+
+    def _set_filmstrip_rating_filter(self, mode: str, rating: int) -> None:
+        if mode not in {"all", "minimum", "exact"}:
+            mode = "all"
+        self._filmstrip_rating_filter_mode = mode
+        self._filmstrip_rating_filter_value = max(0, min(5, int(rating)))
+        current_path = self._current_tlimage.image_path if self._current_tlimage else ""
+        self._reload_filmstrip_assets(current_path=current_path)
+
+    def _set_filmstrip_tag_filter(self, tag: str) -> None:
+        self._filmstrip_tag_filter = tag
+        current_path = self._current_tlimage.image_path if self._current_tlimage else ""
+        self._reload_filmstrip_assets(current_path=current_path)
+
+    def _filmstrip_shortcut_allowed(self) -> bool:
+        focused = QApplication.focusWidget()
+        return not isinstance(focused, (QLineEdit, QPlainTextEdit, QComboBox))
+
+    def _handle_filmstrip_shortcut_key(self, key: int) -> None:
+        if not self._filmstrip_shortcut_allowed():
+            return
+        if Qt.Key.Key_0 <= key <= Qt.Key.Key_5:
+            self._set_current_filmstrip_rating(key - Qt.Key.Key_0)
+            return
+        if key == Qt.Key.Key_Left:
+            self._select_previous_filmstrip_image()
+            return
+        if key == Qt.Key.Key_Right:
+            self._select_next_filmstrip_image()
+
+    def _set_current_filmstrip_rating(self, rating: int) -> None:
+        if not self._filmstrip_shortcut_allowed() or self._current_tlimage is None:
+            return
+        self._set_filmstrip_rating(self._current_tlimage.image_path, rating)
+
+    def _select_next_filmstrip_image(self) -> None:
+        if self._filmstrip_shortcut_allowed():
+            self._select_filmstrip_image(1)
+
+    def _select_previous_filmstrip_image(self) -> None:
+        if self._filmstrip_shortcut_allowed():
+            self._select_filmstrip_image(-1)
+
+    def _select_filmstrip_image(self, step: int) -> None:
+        if not self._filmstrip_assets:
+            return
+        current_path = self._current_tlimage.image_path if self._current_tlimage else ""
+        paths = [asset.path for asset in self._filmstrip_assets]
+        try:
+            current_index = paths.index(current_path)
+        except ValueError:
+            current_index = 0 if step > 0 else len(paths) - 1
+        else:
+            current_index = (current_index + step) % len(paths)
+        self._open_filmstrip_image(paths[current_index])
 
     def _preview_max_dimension(self) -> int:
         return self._FIXED_PREVIEW_MAX_DIMENSION
@@ -6315,6 +6742,9 @@ class MainEditorWindow(QWidget):
         if self._agent_thread is not None:
             event.ignore()
             return
+        if self._filmstrip_store is not None:
+            self._filmstrip_store.close()
+            self._filmstrip_store = None
         self._shutdown_histogram_process()
         super().closeEvent(event)
 

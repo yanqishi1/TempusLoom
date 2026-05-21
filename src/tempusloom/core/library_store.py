@@ -950,6 +950,19 @@ class LibraryProjectIndex:
                 store.close()
         return None
 
+    def open_store_and_asset_by_path(self, asset_path: str | Path) -> tuple[Optional[LibraryStore], Optional[LibraryAsset]]:
+        normalized = _normalize_path(asset_path)
+        for store in self._open_registered_stores():
+            try:
+                asset = store.get_asset_by_path(normalized)
+                if asset:
+                    return store, asset
+            except Exception:
+                store.close()
+                raise
+            store.close()
+        return None, None
+
     def _open_registered_stores(self) -> list[LibraryStore]:
         rows = self._conn.execute(
             """

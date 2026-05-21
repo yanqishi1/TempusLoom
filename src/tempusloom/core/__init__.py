@@ -25,6 +25,7 @@ from .malayer import (
 )
 from .tl_image import TLImage
 from .gallery_navigation import GalleryNavigator
+from .logging_setup import configure_file_logging
 from .library_store import (
     ImportResult,
     LibraryAsset,
@@ -51,6 +52,7 @@ __all__ = [
     "MaskMalayer",
     "GeometryParams",
     "GalleryNavigator",
+    "configure_file_logging",
     "HSLColorParams",
     "BasicAdjustParams",
     "HSLParams",

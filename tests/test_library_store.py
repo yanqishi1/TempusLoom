@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from tempusloom.core.library_store import LibraryProjectIndex, LibraryStore, TempusLoomSettings, ThumbnailProgress
+from tempusloom.core.logging_setup import configure_file_logging
 
 
 def _write_image(path: Path, size=(20, 12), color=(120, 120, 120)) -> None:
@@ -20,6 +21,16 @@ def test_settings_default_project_root_uses_hidden_tempusloom_folder(tmp_path):
 
     assert settings.project_root == tmp_path / "home" / ".TempusLoom"
     assert settings.thumbnail_cache_retention_days == 14
+
+
+def test_configure_file_logging_writes_under_project_root(tmp_path):
+    settings = TempusLoomSettings(tmp_path / "settings.json", home_dir=tmp_path / "home")
+    settings.set_project_root(tmp_path / "project-root")
+
+    log_path = configure_file_logging(settings)
+
+    assert log_path == settings.project_root / "logs" / "tempusloom.log"
+    assert log_path.parent.is_dir()
 
 
 def test_settings_builds_unique_library_paths_inside_project_root(tmp_path):
@@ -419,3 +430,23 @@ def test_library_project_index_loads_and_saves_edit_state_by_asset_path(tmp_path
 
     assert index.save_edit_state_for_asset_path(image, snapshot) is True
     assert index.load_edit_state_for_asset_path(image) == snapshot
+
+
+def test_library_project_index_finds_store_and_asset_by_path(tmp_path):
+    source = tmp_path / "photos"
+    image = source / "a.jpg"
+    _write_image(image)
+    store = LibraryStore.create(tmp_path / "Library.tlibrary", "Library", initial_folder=source)
+    index = LibraryProjectIndex(tmp_path / "library-index.sqlite")
+    index.register_library(store.library_path)
+
+    found_store, asset = index.open_store_and_asset_by_path(image)
+
+    try:
+        assert found_store is not None
+        assert asset is not None
+        assert found_store.library_path == store.library_path
+        assert asset.path == str(image.resolve())
+    finally:
+        if found_store is not None:
+            found_store.close()

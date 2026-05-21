@@ -48,6 +48,7 @@ from tempusloom.ui.styling        import apply_dark_theme
 from tempusloom.ui.gallery_browser import GalleryBrowser
 from tempusloom.ui.editor_window   import MainEditorWindow
 from tempusloom.ui.editor_icons    import icon_pixmap
+from tempusloom.core.logging_setup import configure_file_logging
 
 
 # ── design tokens (must match styling.py) ─────────────────────────────────────
@@ -658,6 +659,7 @@ class TempusLoomWindow(QMainWindow):
 # ── entry ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    configure_file_logging()
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )

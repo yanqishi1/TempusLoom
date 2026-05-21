@@ -73,6 +73,39 @@ C_WHITE        = "#ffffff"
 
 # ── helper widgets ─────────────────────────────────────────────────────────────
 
+def gallery_loupe_layout_order() -> list[str]:
+    return ["toolbar", "view_stack", "action_bar", "filmstrip"]
+
+
+def gallery_loupe_uses_embedded_rating_row() -> bool:
+    return False
+
+
+def gallery_thumbnail_frame_size() -> tuple[int, int]:
+    return (180, 180)
+
+
+def gallery_thumbnail_grid_spacing() -> tuple[int, int]:
+    return (28, 28)
+
+
+def gallery_thumbnail_grid_columns(available_width: int) -> int:
+    margin = 28 * 2
+    spacing = gallery_thumbnail_grid_spacing()[0]
+    card_width = gallery_thumbnail_frame_size()[0]
+    usable_width = max(0, int(available_width) - margin)
+    return max(1, (usable_width + spacing) // (card_width + spacing))
+
+
+def gallery_view_after_asset_reload(current_view: str, selected_path: str = "") -> str:
+    return "loupe" if current_view == "loupe" and selected_path else "grid"
+
+
+def sidebar_item_value(name: str, value: Optional[str] = None, active: bool = False) -> str:
+    del active
+    return value if value is not None else name
+
+
 class HLine(QFrame):
     """1 px horizontal divider."""
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -111,6 +144,16 @@ def _make_chip(text: str, parent=None) -> QPushButton:
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
     btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
     return btn
+
+
+def _remove_widget(widget: Optional[QWidget]) -> None:
+    if widget is None:
+        return
+    parent = widget.parentWidget()
+    if parent and parent.layout():
+        parent.layout().removeWidget(widget)
+    widget.hide()
+    widget.deleteLater()
 
 
 def _logo_pixmap(size: int = 24) -> QPixmap:
@@ -495,7 +538,8 @@ class ThumbnailCard(QWidget):
     double_clicked = pyqtSignal(str)
     rating_changed = pyqtSignal(str, int)
 
-    THUMB_H = 160
+    THUMB_W, THUMB_H = gallery_thumbnail_frame_size()
+    CARD_W = THUMB_W
 
     def __init__(self, path: str, index: int, selected: bool = False,
                  rating: int = 0, missing: bool = False,
@@ -507,6 +551,7 @@ class ThumbnailCard(QWidget):
         self._rating = max(0, min(5, int(rating)))
         self._missing = missing
         self._pixmap: Optional[QPixmap] = None
+        self.setFixedWidth(self.CARD_W)
         self._setup_ui()
 
     # ── build ──────────────────────────────────────────────────────────────────
@@ -517,8 +562,8 @@ class ThumbnailCard(QWidget):
         self.setLayout(layout)
 
         self._img_label = QLabel()
-        self._img_label.setFixedHeight(self.THUMB_H)
-        self._img_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._img_label.setFixedSize(self.THUMB_W, self.THUMB_H)
+        self._img_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._img_label.setStyleSheet(
             f"border-radius: 8px; background: {C_BG_ITEM};"
@@ -546,7 +591,7 @@ class ThumbnailCard(QWidget):
 
     # ── placeholder / real image ───────────────────────────────────────────────
     def _show_placeholder(self) -> None:
-        px = _placeholder_thumb(200, self.THUMB_H, self.index)
+        px = _placeholder_thumb(self.THUMB_W, self.THUMB_H, self.index)
         self._apply_pixmap(px)
 
     def _apply_pixmap(self, px: QPixmap) -> None:
@@ -562,20 +607,20 @@ class ThumbnailCard(QWidget):
         painter.drawPixmap(0, 0, px)
         painter.end()
         self._img_label.setPixmap(rounded)
-        self._img_label.setFixedHeight(self.THUMB_H)
+        self._img_label.setFixedSize(self.THUMB_W, self.THUMB_H)
 
     def set_pixmap(self, px: QPixmap) -> None:
         """Called from main thread with the loaded pixmap."""
-        w = self._img_label.width() or 200
         px = px.scaled(
-            w, self.THUMB_H,
+            self.THUMB_W,
+            self.THUMB_H,
             Qt.AspectRatioMode.KeepAspectRatioByExpanding,
             Qt.TransformationMode.SmoothTransformation,
         )
-        if px.width() > w or px.height() > self.THUMB_H:
-            x = (px.width()  - w)            // 2
+        if px.width() > self.THUMB_W or px.height() > self.THUMB_H:
+            x = (px.width()  - self.THUMB_W) // 2
             y = (px.height() - self.THUMB_H) // 2
-            px = px.copy(x, y, w, self.THUMB_H)
+            px = px.copy(x, y, self.THUMB_W, self.THUMB_H)
         self._apply_pixmap(px)
 
     # ── selection ──────────────────────────────────────────────────────────────
@@ -615,17 +660,21 @@ class AddThumbnailCard(QWidget):
     """Grid entry for adding images or folders to the active library."""
 
     clicked = pyqtSignal()
+    THUMB_W = ThumbnailCard.THUMB_W
     THUMB_H = ThumbnailCard.THUMB_H
+    CARD_W = ThumbnailCard.CARD_W
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedWidth(self.CARD_W)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
         plus = QLabel("+")
-        plus.setFixedHeight(self.THUMB_H)
+        plus.setFixedSize(self.THUMB_W, self.THUMB_H)
+        plus.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         plus.setAlignment(Qt.AlignmentFlag.AlignCenter)
         plus.setStyleSheet(
             f"border:1px dashed {C_BORDER}; border-radius:8px; background:{C_BG_ITEM};"
@@ -850,13 +899,14 @@ class LibraryProjectGrid(QScrollArea):
 
     def _clear(self) -> None:
         for card in self._cards:
-            card.setParent(None)
+            _remove_widget(card)
         self._cards.clear()
         while self._layout.count():
             item = self._layout.takeAt(0)
             widget = item.widget()
             if widget:
-                widget.setParent(None)
+                widget.hide()
+                widget.deleteLater()
 
 
 # ── top bar ────────────────────────────────────────────────────────────────────
@@ -1041,7 +1091,7 @@ class FolderItem(QWidget):
                  active: bool = False, parent=None) -> None:
         super().__init__(parent)
         self._name   = name
-        self._value = value if value is not None else name
+        self._value = sidebar_item_value(name, value=value, active=active)
         self._active = active
         self._setup_ui(icon_px, name, count)
         self._update_style()
@@ -1159,7 +1209,7 @@ class GallerySidebar(QWidget):
         if self._library_list_layout is None:
             return
         for item in self._library_items.values():
-            item.setParent(None)
+            _remove_widget(item)
         self._library_items.clear()
         self._active_library_path = active_library_path
         for project in projects:
@@ -1180,12 +1230,12 @@ class GallerySidebar(QWidget):
         if self._tag_list_layout is None:
             return
         for item in self._tag_items.values():
-            item.setParent(None)
+            _remove_widget(item)
         self._tag_items.clear()
         for name, count in tags:
             active = name == self._active_tag
             icon_color = C_PRIMARY if active else C_TEXT_4
-            item = FolderItem(_tag_icon(icon_color, 14), name, count, active)
+            item = FolderItem(_tag_icon(icon_color, 14), name, count, active=active)
             item.clicked.connect(self._on_tag_clicked)
             self._tag_items[name] = item
             self._tag_list_layout.addWidget(item)
@@ -1437,12 +1487,12 @@ class InfoPanel(QWidget):
         if self._global_tag_layout is None:
             return
         for item in self._global_tag_items.values():
-            item.setParent(None)
+            _remove_widget(item)
         self._global_tag_items.clear()
         for name, count in tags:
             active = name == active_tag
             icon_color = C_PRIMARY if active else C_TEXT_4
-            item = FolderItem(_tag_icon(icon_color, 14), name, count, active)
+            item = FolderItem(_tag_icon(icon_color, 14), name, count, active=active)
             item.clicked.connect(self.tag_selected.emit)
             self._global_tag_items[name] = item
             self._global_tag_layout.addWidget(item)
@@ -1519,14 +1569,12 @@ class InfoPanel(QWidget):
 # ── thumbnail grid ─────────────────────────────────────────────────────────────
 
 class ThumbnailGrid(QScrollArea):
-    """Scrollable 3-column masonry-style grid."""
+    """Scrollable responsive thumbnail grid."""
 
     image_selected = pyqtSignal(str, QPixmap)   # path, pixmap
     image_activated = pyqtSignal(str)
     rating_changed = pyqtSignal(str, int)
     add_requested = pyqtSignal(object)
-
-    COLUMNS = 3
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1543,15 +1591,17 @@ class ThumbnailGrid(QScrollArea):
         self._pool = QThreadPool.globalInstance()
         self._pool.setMaxThreadCount(4)
         self._thumbnail_paths: dict[str, str] = {}
+        self._columns = 1
 
         self._container = QWidget()
         self._container.setObjectName("gridArea")
         self._grid_layout = QGridLayout(self._container)
-        self._grid_layout.setContentsMargins(16, 16, 16, 16)
-        self._grid_layout.setSpacing(12)
-        for col in range(self.COLUMNS):
-            self._grid_layout.setColumnStretch(col, 1)
+        horizontal_gap, vertical_gap = gallery_thumbnail_grid_spacing()
+        self._grid_layout.setContentsMargins(28, 28, 28, 28)
+        self._grid_layout.setHorizontalSpacing(horizontal_gap)
+        self._grid_layout.setVerticalSpacing(vertical_gap)
         self.setWidget(self._container)
+        self._update_columns()
 
     # ── loading ────────────────────────────────────────────────────────────────
     def load_images(self, paths: list[str]) -> None:
@@ -1560,16 +1610,17 @@ class ThumbnailGrid(QScrollArea):
     def load_assets(self, assets: list[LibraryAsset], thumbnail_paths: Optional[dict[str, str]] = None) -> None:
         # clear
         for card in self._cards:
-            card.setParent(None)
+            _remove_widget(card)
         self._cards.clear()
         if self._add_card:
-            self._add_card.setParent(None)
+            _remove_widget(self._add_card)
             self._add_card = None
         self._pixmap_cache.clear()
         self._thumbnail_paths = thumbnail_paths or {}
         self._assets_by_path = {asset.path: asset for asset in assets}
+        self._update_columns()
 
-        self._add_card = AddThumbnailCard()
+        self._add_card = AddThumbnailCard(self._container)
         self._add_card.clicked.connect(lambda: self.add_requested.emit(self._add_card))
         self._grid_layout.addWidget(self._add_card, 0, 0)
 
@@ -1578,9 +1629,9 @@ class ThumbnailGrid(QScrollArea):
             return
 
         for idx, asset in enumerate(assets):
-            row, col = divmod(idx + 1, self.COLUMNS)
+            row, col = divmod(idx + 1, self._columns)
             selected = (idx == 0)
-            card = ThumbnailCard(asset.path, idx, selected, rating=asset.rating, missing=asset.missing)
+            card = ThumbnailCard(asset.path, idx, selected, rating=asset.rating, missing=asset.missing, parent=self._container)
             card.clicked.connect(self._on_card_clicked)
             card.double_clicked.connect(self.image_activated.emit)
             card.rating_changed.connect(self.rating_changed.emit)
@@ -1597,9 +1648,49 @@ class ThumbnailGrid(QScrollArea):
 
         # kick off async loading
         for idx, asset in enumerate(assets):
-            loader = ThumbLoader(asset.path, 200, ThumbnailCard.THUMB_H, idx, self._thumbnail_paths.get(asset.path, ""))
+            loader = ThumbLoader(
+                asset.path,
+                ThumbnailCard.THUMB_W,
+                ThumbnailCard.THUMB_H,
+                idx,
+                self._thumbnail_paths.get(asset.path, ""),
+            )
             loader.signals.loaded.connect(self._on_thumb_loaded)
             self._pool.start(loader)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._update_columns():
+            self._relayout_cards()
+
+    def _update_columns(self) -> bool:
+        width = self.viewport().width() or self.width()
+        columns = gallery_thumbnail_grid_columns(width)
+        if columns == self._columns:
+            return False
+        old_columns = self._columns
+        self._columns = columns
+        self._configure_columns(max(old_columns, columns))
+        return True
+
+    def _configure_columns(self, previous_columns: int = 0) -> None:
+        for col in range(max(previous_columns + 1, self._columns + 2)):
+            if col < self._columns:
+                self._grid_layout.setColumnMinimumWidth(col, ThumbnailCard.CARD_W)
+                self._grid_layout.setColumnStretch(col, 0)
+            elif col == self._columns:
+                self._grid_layout.setColumnMinimumWidth(col, 0)
+                self._grid_layout.setColumnStretch(col, 1)
+            else:
+                self._grid_layout.setColumnMinimumWidth(col, 0)
+                self._grid_layout.setColumnStretch(col, 0)
+
+    def _relayout_cards(self) -> None:
+        if self._add_card:
+            self._grid_layout.addWidget(self._add_card, 0, 0)
+        for idx, card in enumerate(self._cards):
+            row, col = divmod(idx + 1, self._columns)
+            self._grid_layout.addWidget(card, row, col)
 
     @staticmethod
     def _asset_from_path(path: str) -> LibraryAsset:
@@ -1661,8 +1752,6 @@ class GalleryLoupeView(QWidget):
     """Large single-image browser view."""
 
     back_to_grid = pyqtSignal()
-    rating_changed = pyqtSignal(int)
-
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("gridArea")
@@ -1689,25 +1778,12 @@ class GalleryLoupeView(QWidget):
         self._image.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self._image, 1)
 
-        self._rating_widget = StarRatingWidget(0)
-        rating_row = QWidget()
-        rating_layout = QHBoxLayout(rating_row)
-        rating_layout.setContentsMargins(0, 0, 0, 0)
-        rating_layout.addStretch()
-        rating_layout.addWidget(self._rating_widget)
-        rating_layout.addStretch()
-        self._rating_widget.rating_changed.connect(self.rating_changed.emit)
-        layout.addWidget(rating_row)
-
     def set_image(self, path: str, pixmap: Optional[QPixmap] = None) -> None:
         self._path = path
         self._title.setText(Path(path).name if path else "—")
         source = pixmap if pixmap and not pixmap.isNull() else _load_oriented_pixmap(path)
         self._pixmap = source
         self._refresh_pixmap()
-
-    def set_rating(self, rating: int) -> None:
-        self._rating_widget.set_rating(rating)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -1989,10 +2065,6 @@ class GalleryBrowser(QWidget):
         self._grid_toolbar = GridToolbar()
         grid_v.addWidget(self._grid_toolbar)
 
-        self._gallery_action_bar = GalleryActionBar()
-        self._gallery_action_bar.hide()
-        grid_v.addWidget(self._gallery_action_bar)
-
         self._view_stack = QStackedWidget()
         self._project_grid = LibraryProjectGrid()
         self._grid = ThumbnailGrid()
@@ -2001,6 +2073,10 @@ class GalleryBrowser(QWidget):
         self._view_stack.addWidget(self._grid)
         self._view_stack.addWidget(self._loupe)
         grid_v.addWidget(self._view_stack, 1)
+
+        self._gallery_action_bar = GalleryActionBar()
+        self._gallery_action_bar.hide()
+        grid_v.addWidget(self._gallery_action_bar)
 
         self._filmstrip = Filmstrip()
         grid_v.addWidget(self._filmstrip)
@@ -2031,7 +2107,6 @@ class GalleryBrowser(QWidget):
         self._info_panel.rating_changed.connect(self._set_rating_for_selected)
         self._info_panel.tags_changed.connect(self._set_tags_for_selected)
         self._loupe.back_to_grid.connect(self._show_grid)
-        self._loupe.rating_changed.connect(self._set_rating_for_selected)
         self._filmstrip.image_selected.connect(self._select_path)
         self._filmstrip.add_requested.connect(self._show_add_to_current_library_menu)
 
@@ -2284,7 +2359,6 @@ class GalleryBrowser(QWidget):
         tags = self._asset_tags_for_path(path)
         self._info_panel.update_info(path, pixmap, rating=asset.rating if asset else 0, tags=tags)
         self._gallery_action_bar.set_current_metadata(asset.rating if asset else 0, tags)
-        self._loupe.set_rating(asset.rating if asset else 0)
         self._filmstrip.set_selected(path)
         if self._view_stack.currentWidget() == self._loupe:
             self._show_loupe_image(path)
@@ -2336,6 +2410,7 @@ class GalleryBrowser(QWidget):
         if not self._store:
             self._load_library_projects()
             return
+        current_view = "loupe" if self._view_stack.currentWidget() == self._loupe else "grid"
         exact_rating = self._rating_filter_value if self._rating_filter_mode == "exact" else None
         min_rating = self._rating_filter_value if self._rating_filter_mode == "minimum" else 0
         if self._active_tag:
@@ -2363,10 +2438,13 @@ class GalleryBrowser(QWidget):
         selected_path = self._navigator.set_paths([asset.path for asset in self._assets], preferred_path=preferred)
         self._grid.load_assets(self._assets, thumbnail_paths=self._thumbnail_paths)
         self._filmstrip.load_assets(self._assets, selected_path=selected_path, thumbnail_paths=self._thumbnail_paths)
-        self._gallery_action_bar.hide()
-        self._view_stack.setCurrentWidget(self._grid)
+        next_view = gallery_view_after_asset_reload(current_view, selected_path)
+        self._gallery_action_bar.setVisible(next_view == "loupe")
+        self._view_stack.setCurrentWidget(self._loupe if next_view == "loupe" else self._grid)
         if selected_path:
             self._grid.select_path(selected_path)
+            if next_view == "loupe":
+                self._show_loupe_image(selected_path)
         self._grid_toolbar.update_info(label, len(self._assets))
         self._grid_toolbar.set_project_browser_mode(False)
         self._gallery_action_bar.set_rating_filter(self._rating_filter_mode, self._rating_filter_value)
