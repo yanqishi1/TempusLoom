@@ -316,6 +316,39 @@ def test_library_project_summary_includes_dates_and_multiple_cover_paths(tmp_pat
     assert summary.cover_path in summary.cover_paths
 
 
+def test_library_project_summary_prefers_cached_thumbnail_cover_paths(tmp_path):
+    source = tmp_path / "photos"
+    first_image = source / "a.jpg"
+    second_image = source / "b.jpg"
+    _write_image(first_image)
+    _write_image(second_image)
+    library = LibraryStore.create(tmp_path / "Library.tlibrary", "Library", initial_folder=source)
+    library.ensure_thumbnail_cache()
+
+    summary = library.project_summary()
+    original_paths = {str(first_image.resolve()), str(second_image.resolve())}
+
+    assert set(summary.cover_paths).isdisjoint(original_paths)
+    assert all(Path(path).is_file() for path in summary.cover_paths)
+
+
+def test_library_project_summary_uses_database_without_refreshing_every_path(tmp_path, monkeypatch):
+    source = tmp_path / "photos"
+    _write_image(source / "a.jpg")
+    _write_image(source / "b.jpg")
+    library = LibraryStore.create(tmp_path / "Library.tlibrary", "Library", initial_folder=source)
+
+    def fail_refresh() -> None:
+        raise AssertionError("project summaries should not stat every image path")
+
+    monkeypatch.setattr(library, "refresh_missing_flags", fail_refresh)
+
+    summary = library.project_summary()
+
+    assert summary.image_count == 2
+    assert len(summary.cover_paths) == 2
+
+
 def test_library_project_index_can_forget_registered_library_without_deleting_files(tmp_path):
     source = tmp_path / "photos"
     _write_image(source / "a.jpg")

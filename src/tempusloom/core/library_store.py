@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 import json
 from pathlib import Path
-import random
 import re
 import shutil
 import sqlite3
@@ -746,9 +745,19 @@ class LibraryStore:
             LIMIT 1
             """
         ).fetchone()
-        assets = self.query_images(include_missing=False)
-        cover_assets = random.sample(assets, min(len(assets), 4)) if assets else []
-        cover_paths = tuple(asset.path for asset in cover_assets)
+        image_count = int(self._conn.execute(
+            "SELECT COUNT(*) AS count FROM image_asset WHERE missing = 0"
+        ).fetchone()["count"])
+        cover_rows = self._conn.execute(
+            """
+            SELECT *
+            FROM image_asset
+            WHERE missing = 0
+            ORDER BY imported_at ASC, file_name ASC
+            LIMIT 4
+            """
+        ).fetchall()
+        cover_paths = tuple(self._summary_cover_path(self._row_to_asset(cover_row)) for cover_row in cover_rows)
         cover_path = cover_paths[0] if cover_paths else ""
         name = str(row["name"]) if row else self.library_path.stem
         root_path = str(row["root_path"]) if row and row["root_path"] else None
@@ -759,13 +768,17 @@ class LibraryStore:
             name=name,
             library_path=str(self.library_path),
             root_path=root_path,
-            image_count=len(assets),
+            image_count=image_count,
             cover_path=cover_path,
             cover_paths=cover_paths,
             created_at=created_at,
             updated_at=updated_at,
             last_opened_at=last_opened_at,
         )
+
+    def _summary_cover_path(self, asset: LibraryAsset) -> str:
+        thumbnail_path = self.thumbnail_path_for_asset(asset)
+        return str(thumbnail_path) if thumbnail_path.is_file() else asset.path
 
     @staticmethod
     def _row_to_asset(row: sqlite3.Row) -> LibraryAsset:

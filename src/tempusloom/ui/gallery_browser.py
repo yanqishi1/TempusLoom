@@ -44,6 +44,7 @@ from tempusloom.core.gallery_navigation import (
     gallery_tab_shows_project_browser,
     neighboring_paths,
     split_gallery_import_paths,
+    toggled_tag_filter,
 )
 from PIL import Image, ImageOps
 
@@ -85,6 +86,11 @@ def gallery_thumbnail_frame_size() -> tuple[int, int]:
     return (180, 180)
 
 
+def gallery_thumbnail_card_size() -> tuple[int, int]:
+    frame_width, frame_height = gallery_thumbnail_frame_size()
+    return (frame_width, frame_height + 36)
+
+
 def gallery_thumbnail_grid_spacing() -> tuple[int, int]:
     return (28, 28)
 
@@ -97,13 +103,34 @@ def gallery_thumbnail_grid_columns(available_width: int) -> int:
     return max(1, (usable_width + spacing) // (card_width + spacing))
 
 
+def gallery_project_grid_columns(available_width: int) -> int:
+    margin = 28 * 2
+    spacing = 18
+    card_width = 260
+    usable_width = max(0, int(available_width) - margin)
+    return max(1, (usable_width + spacing) // (card_width + spacing))
+
+
 def gallery_view_after_asset_reload(current_view: str, selected_path: str = "") -> str:
     return "loupe" if current_view == "loupe" and selected_path else "grid"
+
+
+def gallery_project_reload_policy(reason: str) -> str:
+    return "reuse_loaded" if reason == "back_button" else "refresh_index"
 
 
 def sidebar_item_value(name: str, value: Optional[str] = None, active: bool = False) -> str:
     del active
     return value if value is not None else name
+
+
+def sidebar_active_tag_for_refresh(active_tag: str, tag_names: list[str]) -> str:
+    tag = active_tag.strip()
+    return tag if tag in tag_names else ""
+
+
+def gallery_widget_removal_policy() -> str:
+    return "delete"
 
 
 class HLine(QFrame):
@@ -539,7 +566,7 @@ class ThumbnailCard(QWidget):
     rating_changed = pyqtSignal(str, int)
 
     THUMB_W, THUMB_H = gallery_thumbnail_frame_size()
-    CARD_W = THUMB_W
+    CARD_W, CARD_H = gallery_thumbnail_card_size()
 
     def __init__(self, path: str, index: int, selected: bool = False,
                  rating: int = 0, missing: bool = False,
@@ -551,7 +578,7 @@ class ThumbnailCard(QWidget):
         self._rating = max(0, min(5, int(rating)))
         self._missing = missing
         self._pixmap: Optional[QPixmap] = None
-        self.setFixedWidth(self.CARD_W)
+        self.setFixedSize(self.CARD_W, self.CARD_H)
         self._setup_ui()
 
     # ── build ──────────────────────────────────────────────────────────────────
@@ -663,11 +690,12 @@ class AddThumbnailCard(QWidget):
     THUMB_W = ThumbnailCard.THUMB_W
     THUMB_H = ThumbnailCard.THUMB_H
     CARD_W = ThumbnailCard.CARD_W
+    CARD_H = ThumbnailCard.CARD_H
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedWidth(self.CARD_W)
+        self.setFixedSize(self.CARD_W, self.CARD_H)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
@@ -857,15 +885,16 @@ class LibraryProjectGrid(QScrollArea):
     project_opened = pyqtSignal(str)
     project_menu_requested = pyqtSignal(str, object)
 
-    COLUMNS = 5
-
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("gridArea")
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._columns = 1
+        self._projects: list[LibraryProject] = []
         self._cards: list[LibraryProjectCard] = []
+        self._create_card: Optional[NewLibraryProjectCard] = None
 
         self._container = QWidget()
         self._container.setObjectName("gridArea")
@@ -873,31 +902,67 @@ class LibraryProjectGrid(QScrollArea):
         self._layout.setContentsMargins(28, 20, 28, 20)
         self._layout.setHorizontalSpacing(18)
         self._layout.setVerticalSpacing(18)
-        for col in range(self.COLUMNS):
-            self._layout.setColumnMinimumWidth(col, LibraryProjectCard.CARD_W)
-            self._layout.setColumnStretch(col, 0)
-        self._layout.setColumnStretch(self.COLUMNS, 1)
         self._layout.setRowStretch(999, 1)
         self.setWidget(self._container)
+        self._update_columns()
 
     def load_projects(self, projects: list[LibraryProject]) -> None:
         self._clear()
+        self._projects = list(projects)
+        self._update_columns()
 
-        create_card = NewLibraryProjectCard()
-        create_card.clicked.connect(self.create_requested.emit)
-        self._layout.addWidget(create_card, 0, 0)
+        self._create_card = NewLibraryProjectCard(self._container)
+        self._create_card.clicked.connect(self.create_requested.emit)
+        self._layout.addWidget(self._create_card, 0, 0)
 
         for idx, project in enumerate(projects):
-            row, col = divmod(idx + 1, self.COLUMNS)
-            card = LibraryProjectCard(project, idx)
+            row, col = divmod(idx + 1, self._columns)
+            card = LibraryProjectCard(project, idx, parent=self._container)
             card.opened.connect(self.project_opened.emit)
             card.menu_requested.connect(self.project_menu_requested.emit)
             self._cards.append(card)
             self._layout.addWidget(card, row, col)
-        last_row = len(projects) // self.COLUMNS
+        last_row = len(projects) // self._columns
+        self._layout.setRowStretch(last_row + 1, 1)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._update_columns():
+            self._relayout_cards()
+
+    def _update_columns(self) -> bool:
+        width = self.viewport().width() or self.width()
+        columns = gallery_project_grid_columns(width)
+        if columns == self._columns:
+            return False
+        old_columns = self._columns
+        self._columns = columns
+        self._configure_columns(max(old_columns, columns))
+        return True
+
+    def _configure_columns(self, previous_columns: int = 0) -> None:
+        for col in range(max(previous_columns + 1, self._columns + 2)):
+            if col < self._columns:
+                self._layout.setColumnMinimumWidth(col, LibraryProjectCard.CARD_W)
+                self._layout.setColumnStretch(col, 0)
+            elif col == self._columns:
+                self._layout.setColumnMinimumWidth(col, 0)
+                self._layout.setColumnStretch(col, 1)
+            else:
+                self._layout.setColumnMinimumWidth(col, 0)
+                self._layout.setColumnStretch(col, 0)
+
+    def _relayout_cards(self) -> None:
+        if self._create_card:
+            self._layout.addWidget(self._create_card, 0, 0)
+        for idx, card in enumerate(self._cards):
+            row, col = divmod(idx + 1, self._columns)
+            self._layout.addWidget(card, row, col)
+        last_row = len(self._projects) // self._columns
         self._layout.setRowStretch(last_row + 1, 1)
 
     def _clear(self) -> None:
+        self._create_card = None
         for card in self._cards:
             _remove_widget(card)
         self._cards.clear()
@@ -1226,12 +1291,13 @@ class GallerySidebar(QWidget):
             self._library_items[project.library_path] = item
             self._library_list_layout.addWidget(item)
 
-    def set_tags(self, tags: list[tuple[str, str]]) -> None:
+    def set_tags(self, tags: list[tuple[str, str]], active_tag: str = "") -> None:
         if self._tag_list_layout is None:
             return
         for item in self._tag_items.values():
             _remove_widget(item)
         self._tag_items.clear()
+        self._active_tag = sidebar_active_tag_for_refresh(active_tag, [name for name, _count in tags])
         for name, count in tags:
             active = name == self._active_tag
             icon_color = C_PRIMARY if active else C_TEXT_4
@@ -1239,8 +1305,6 @@ class GallerySidebar(QWidget):
             item.clicked.connect(self._on_tag_clicked)
             self._tag_items[name] = item
             self._tag_list_layout.addWidget(item)
-        if self._active_tag not in self._tag_items:
-            self._active_tag = ""
 
 
 # ── grid toolbar ───────────────────────────────────────────────────────────────
@@ -1841,14 +1905,14 @@ class Filmstrip(QWidget):
         show_add_slot: bool = True,
     ) -> None:
         for button in self._buttons.values():
-            button.setParent(None)
+            _remove_widget(button)
         self._buttons.clear()
         self._selected_path = selected_path
         while self._layout.count():
             item = self._layout.takeAt(0)
             widget = item.widget()
             if widget:
-                widget.setParent(None)
+                _remove_widget(widget)
         thumbnail_paths = thumbnail_paths or {}
         for asset in assets:
             btn = QPushButton()
@@ -2012,8 +2076,10 @@ class GalleryBrowser(QWidget):
         super().__init__(parent)
         self._current_dir: Optional[str] = None
         self._store: Optional[LibraryStore] = None
+        self._current_library_name = ""
         self._settings = TempusLoomSettings()
         self._project_index = LibraryProjectIndex()
+        self._project_summaries: list[LibraryProject] = []
         self._assets: list[LibraryAsset] = []
         self._asset_by_path: dict[str, LibraryAsset] = {}
         self._thumbnail_paths: dict[str, str] = {}
@@ -2098,7 +2164,7 @@ class GalleryBrowser(QWidget):
         self._grid.image_activated.connect(self._show_loupe_for_path)
         self._grid.rating_changed.connect(self._set_rating_for_path)
         self._grid.add_requested.connect(self._show_add_to_current_library_menu)
-        self._grid_toolbar.back_to_projects_clicked.connect(self._load_library_projects)
+        self._grid_toolbar.back_to_projects_clicked.connect(self._show_library_projects)
         self._grid_toolbar.rating_filter_changed.connect(self._set_rating_filter)
         self._gallery_action_bar.rating_changed.connect(self._set_rating_for_selected)
         self._gallery_action_bar.tags_changed.connect(self._set_tags_for_selected)
@@ -2147,8 +2213,21 @@ class GalleryBrowser(QWidget):
 
     # ── initial data ───────────────────────────────────────────────────────────
     def _load_library_projects(self) -> None:
-        projects = self._project_index.list_projects()
+        projects = self._refresh_project_summaries()
+        self._show_library_projects(projects)
+
+    def _refresh_project_summaries(self) -> list[LibraryProject]:
+        self._project_summaries = self._project_index.list_projects()
+        return self._project_summaries
+
+    def _show_library_projects(self, projects: Optional[list[LibraryProject]] = None) -> None:
+        if projects is None:
+            projects = self._project_summaries
+            if not projects:
+                projects = self._project_index.list_projects()
+                self._project_summaries = list(projects)
         self._store = None
+        self._current_library_name = ""
         self._assets = []
         self._asset_by_path = {}
         self._thumbnail_paths = {}
@@ -2159,7 +2238,7 @@ class GalleryBrowser(QWidget):
         self._filmstrip.load_assets([], show_add_slot=False)
         self._sidebar.set_libraries(projects, "")
         tag_counts = [(name, str(count)) for name, count in self._project_index.global_tag_counts()]
-        self._sidebar.set_tags(tag_counts)
+        self._sidebar.set_tags(tag_counts, self._active_tag)
         self._info_panel.set_global_tags(tag_counts, self._active_tag)
         self._grid_toolbar.set_info_text(f"图库项目  ·  {len(projects)} 个图库")
         self._grid_toolbar.set_project_browser_mode(True)
@@ -2199,7 +2278,9 @@ class GalleryBrowser(QWidget):
         library_path = self._settings.library_path_for_name(name.strip())
         try:
             self._store = LibraryStore.create(library_path, name.strip(), initial_folder=folder)
+            self._current_library_name = self._store.project_summary().name
             self._project_index.register_library(self._store.library_path)
+            self._refresh_project_summaries()
             self._prepare_thumbnails_for_current_library()
         except Exception as exc:
             QMessageBox.warning(self, "创建图库失败", str(exc))
@@ -2231,6 +2312,8 @@ class GalleryBrowser(QWidget):
             return
         try:
             store.rename_project(name.strip())
+            if self._store and str(self._store.library_path) == library_path:
+                self._current_library_name = name.strip()
         except Exception as exc:
             QMessageBox.warning(self, "重命名失败", str(exc))
         finally:
@@ -2256,7 +2339,9 @@ class GalleryBrowser(QWidget):
             return
         try:
             self._store = LibraryStore.open(folder)
+            self._current_library_name = self._store.project_summary().name
             self._project_index.register_library(self._store.library_path)
+            self._refresh_project_summaries()
             self._prepare_thumbnails_for_current_library()
         except Exception as exc:
             QMessageBox.warning(self, "打开图库失败", str(exc))
@@ -2267,7 +2352,9 @@ class GalleryBrowser(QWidget):
     def _open_registered_library(self, library_path: str) -> None:
         try:
             self._store = LibraryStore.open(library_path)
+            self._current_library_name = self._store.project_summary().name
             self._project_index.register_library(self._store.library_path)
+            self._refresh_project_summaries()
             self._prepare_thumbnails_for_current_library()
         except Exception as exc:
             QMessageBox.warning(self, "打开图库失败", str(exc))
@@ -2289,6 +2376,7 @@ class GalleryBrowser(QWidget):
         if not folder:
             return
         result = self._store.add_folder(folder)
+        self._refresh_project_summaries()
         self._prepare_thumbnails_for_current_library()
         self._active_folder_path = None
         self._reload_assets()
@@ -2306,6 +2394,7 @@ class GalleryBrowser(QWidget):
         if not files:
             return
         result = self._store.add_images(files)
+        self._refresh_project_summaries()
         self._prepare_thumbnails_for_current_library()
         self._reload_assets()
         QMessageBox.information(self, "导入完成", f"扫描 {result.scanned} 张，新增 {result.imported} 张，跳过 {result.skipped} 张。")
@@ -2330,6 +2419,7 @@ class GalleryBrowser(QWidget):
             scanned += result.scanned
             imported += result.imported
             skipped += result.skipped
+        self._refresh_project_summaries()
         self._prepare_thumbnails_for_current_library()
         self._active_folder_path = None
         self._reload_assets()
@@ -2348,7 +2438,7 @@ class GalleryBrowser(QWidget):
         self._reload_assets()
 
     def _on_tag_selected(self, tag: str) -> None:
-        self._active_tag = tag
+        self._active_tag = toggled_tag_filter(tag, self._active_tag)
         self._active_folder_path = None
         self._reload_assets()
 
@@ -2408,7 +2498,7 @@ class GalleryBrowser(QWidget):
 
     def _reload_assets(self, *, keep_selection: Optional[str] = None) -> None:
         if not self._store:
-            self._load_library_projects()
+            self._show_library_projects()
             return
         current_view = "loupe" if self._view_stack.currentWidget() == self._loupe else "grid"
         exact_rating = self._rating_filter_value if self._rating_filter_mode == "exact" else None
@@ -2430,7 +2520,7 @@ class GalleryBrowser(QWidget):
                 search=self._search_text,
                 folder_path=self._active_folder_path,
             )
-            label = self._store.project_summary().name if self._store else "图库"
+            label = self._current_library_name or "图库"
         self._asset_by_path = {asset.path: asset for asset in self._assets}
         self._thumbnail_paths = self._cached_thumbnail_paths(self._assets)
         self._prune_full_pixmap_cache()
@@ -2448,9 +2538,11 @@ class GalleryBrowser(QWidget):
         self._grid_toolbar.update_info(label, len(self._assets))
         self._grid_toolbar.set_project_browser_mode(False)
         self._gallery_action_bar.set_rating_filter(self._rating_filter_mode, self._rating_filter_value)
-        self._sidebar.set_libraries(self._project_index.list_projects(), str(self._store.library_path))
+        if not self._project_summaries:
+            self._project_summaries = self._project_index.list_projects()
+        self._sidebar.set_libraries(self._project_summaries, str(self._store.library_path))
         tag_counts = [(name, str(count)) for name, count in self._project_index.global_tag_counts()]
-        self._sidebar.set_tags(tag_counts)
+        self._sidebar.set_tags(tag_counts, self._active_tag)
         self._info_panel.set_global_tags(tag_counts, self._active_tag)
         self._gallery_action_bar.set_tag_options(tag_counts, self._active_tag)
 
@@ -2520,6 +2612,7 @@ class GalleryBrowser(QWidget):
             QMessageBox.warning(self, "准备缩略图失败", str(result))
             return
         if self._store:
+            self._refresh_project_summaries()
             self._thumbnail_paths = self._cached_thumbnail_paths(self._assets)
             self._reload_assets(keep_selection=self._navigator.current_path)
 

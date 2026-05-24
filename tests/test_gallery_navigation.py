@@ -10,6 +10,7 @@ from tempusloom.core.gallery_navigation import gallery_tab_shows_project_browser
 from tempusloom.core.gallery_navigation import neighboring_paths
 from tempusloom.core.gallery_navigation import split_gallery_import_paths
 from tempusloom.core.gallery_navigation import tag_filter_matches
+from tempusloom.core.gallery_navigation import toggled_tag_filter
 
 
 def test_gallery_navigator_tracks_selection_and_moves_left_right():
@@ -81,3 +82,9 @@ def test_tag_filter_matches_only_active_tag():
     assert tag_filter_matches(["人像", "精选"], "") is True
     assert tag_filter_matches(["人像", "精选"], "精选") is True
     assert tag_filter_matches(["人像"], "风景") is False
+
+
+def test_toggled_tag_filter_clears_when_clicking_active_tag_again():
+    assert toggled_tag_filter("落日", "人像") == "落日"
+    assert toggled_tag_filter("落日", "落日") == ""
+    assert toggled_tag_filter("  落日  ", "") == "落日"

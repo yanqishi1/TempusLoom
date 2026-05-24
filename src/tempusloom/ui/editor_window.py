@@ -55,6 +55,7 @@ C_PRIMARY_H = "#5B8FF9"
 C_BG_APP    = "#181818"
 C_BG_TOPBAR = "#252525"
 C_BG_PANEL  = "#1e1e1e"
+C_BG_PANEL_ALT = "#202020"
 C_BG_ITEM   = "#2c2c2c"
 C_BG_ACTIVE = "#1a3060"
 C_BG_RIGHT  = "#222222"
@@ -78,6 +79,39 @@ def editor_side_panel_order(*, ai_visible: bool = True) -> list[str]:
         order.append("ai_chat")
     order.append("right_panel")
     return order
+
+
+def editor_section_boundary_tokens() -> dict[str, str]:
+    return {
+        "panel_border": C_BORDER_P,
+        "panel_alt": C_BG_PANEL_ALT,
+    }
+
+
+def editor_adjust_section_chrome() -> dict[str, bool]:
+    return {
+        "collapse_arrow": True,
+        "content_left_rail": False,
+    }
+
+
+def editor_tool_sidebar_tools() -> list[str]:
+    return ["mouse-pointer", "crop", "type", "pipette"]
+
+
+def editor_tool_shortcuts() -> dict[str, str]:
+    return {
+        "V": "mouse-pointer",
+        "C": "crop",
+        "T": "type",
+        "I": "pipette",
+    }
+
+
+def editor_tool_sidebar_chrome() -> dict[str, str]:
+    return {
+        "border_right": f"1px solid {C_BORDER_P}",
+    }
 
 
 def _lbl(text: str, color: str = C_TEXT_3, size: int = 12,
@@ -462,25 +496,19 @@ class ToolSidebar(QWidget):
 
     tool_changed = pyqtSignal(str)
 
-    _TOOLS = [
-        ("mouse-pointer", "选择  V"),
-        ("crop",          "裁剪  C"),
-        ("pen-tool",      "钢笔  P"),
-        ("paintbrush",    "画笔  B"),
-        ("eraser",        "橡皮擦  E"),
-        ("type",          "文字  T"),
-        ("pipette",       "吸管  I"),
-    ]
-    _AI_TOOLS = [
-        ("wand-2", "智能魔棒"),
-        ("stamp",  "仿制图章  S"),
-    ]
+    _TOOL_LABELS = {
+        "mouse-pointer": "选择  V",
+        "crop": "裁剪  C",
+        "type": "文字  T",
+        "pipette": "吸管  I",
+    }
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFixedWidth(48)
+        chrome = editor_tool_sidebar_chrome()
         self.setStyleSheet(
-            f"background:{C_BG_PANEL}; border-right:1px solid {C_BORDER_P};"
+            f"background:{C_BG_PANEL}; border-right:{chrome['border_right']};"
         )
         self._buttons: list[ToolButton] = []
         self._active_name = "mouse-pointer"
@@ -491,22 +519,9 @@ class ToolSidebar(QWidget):
         lo.setContentsMargins(4, 8, 4, 8)
         lo.setSpacing(2)
 
-        for icon_name, tip in self._TOOLS:
+        for icon_name in editor_tool_sidebar_tools():
+            tip = self._TOOL_LABELS[icon_name]
             btn = ToolButton(icon_name, tip, active=(icon_name == self._active_name))
-            btn.toggled.connect(lambda checked, n=icon_name: self._on_tool(n, checked))
-            lo.addWidget(btn, alignment=Qt.AlignmentFlag.AlignHCenter)
-            self._buttons.append(btn)
-
-        # separator
-        sep = QFrame()
-        sep.setFixedSize(24, 1)
-        sep.setStyleSheet(f"background:{C_BORDER}; border:none;")
-        lo.addSpacing(4)
-        lo.addWidget(sep, alignment=Qt.AlignmentFlag.AlignHCenter)
-        lo.addSpacing(4)
-
-        for icon_name, tip in self._AI_TOOLS:
-            btn = ToolButton(icon_name, tip, active=False)
             btn.toggled.connect(lambda checked, n=icon_name: self._on_tool(n, checked))
             lo.addWidget(btn, alignment=Qt.AlignmentFlag.AlignHCenter)
             self._buttons.append(btn)
@@ -557,7 +572,7 @@ class ToolOptionsBar(QWidget):
         super().__init__(parent)
         self.setFixedHeight(40)
         self.setStyleSheet(
-            f"background:{C_BG_TOPBAR}; border-bottom:1px solid {C_BORDER};"
+            f"background:{C_BG_TOPBAR}; border-bottom:1px solid {C_BORDER_P};"
         )
         self._grid_on  = False
         self._ruler_on = False
@@ -641,13 +656,8 @@ class ToolOptionsBar(QWidget):
         _NAMES = {
             "mouse-pointer": "选择",
             "crop":          "裁剪",
-            "pen-tool":      "钢笔",
-            "paintbrush":    "画笔",
-            "eraser":        "橡皮擦",
             "type":          "文字",
             "pipette":       "吸管",
-            "wand-2":        "魔棒",
-            "stamp":         "图章",
         }
         _NAMES["mask-linear"] = "Linear Mask"
         _NAMES["mask-radial"] = "Radial Mask"
@@ -1777,7 +1787,9 @@ class EditorStatusBar(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFixedHeight(28)
-        self.setStyleSheet(f"background:{C_BG_PANEL}; border:none;")
+        self.setStyleSheet(
+            f"background:{C_BG_PANEL_ALT}; border-top:1px solid {C_BORDER_P};"
+        )
         self._build()
 
     def _build(self) -> None:
@@ -1867,7 +1879,9 @@ class EditorFilmstrip(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFixedHeight(136)
-        self.setStyleSheet(f"background:{C_BG_PANEL}; border-top:1px solid {C_BORDER};")
+        self.setStyleSheet(
+            f"background:{C_BG_PANEL}; border-top:1px solid {C_BORDER_P};"
+        )
         self._current_path = ""
         self._buttons: dict[str, QPushButton] = {}
         self._assets_by_path: dict[str, LibraryAsset] = {}
@@ -2064,7 +2078,10 @@ class AIChatBox(QWidget):
         self._latest_json_text = ""
         self.setFixedWidth(320)
         self.setMinimumWidth(300)
-        self.setStyleSheet(f"background:{C_BG_PANEL}; border-left:1px solid {C_BORDER};")
+        self.setStyleSheet(
+            f"background:{C_BG_PANEL}; border-left:1px solid {C_BORDER_P};"
+            f"border-right:1px solid {C_BORDER_P};"
+        )
         self._build()
         self.clear_conversation()
 
@@ -2840,12 +2857,12 @@ class AdjustSection(QWidget):
             "_ClickableHeader:hover{background:rgba(255,255,255,0.03);}"
         )
         hdr_lo = QHBoxLayout(hdr)
-        hdr_lo.setContentsMargins(12, 0, 8, 0)
+        hdr_lo.setContentsMargins(10, 0, 8, 0)
         hdr_lo.setSpacing(6)
 
         # collapse arrow
         self._arrow_lbl = QLabel()
-        self._arrow_lbl.setFixedSize(12, 12)
+        self._arrow_lbl.setFixedSize(14, 14)
         self._arrow_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         hdr_lo.addWidget(self._arrow_lbl)
 
@@ -2903,7 +2920,7 @@ class AdjustSection(QWidget):
         self._content = QWidget()
         self._content.setStyleSheet("background:transparent;")
         self.content_lo = QVBoxLayout(self._content)
-        self.content_lo.setContentsMargins(12, 4, 12, 12)
+        self.content_lo.setContentsMargins(14, 4, 14, 12)
         self.content_lo.setSpacing(10)
         root_lo.addWidget(self._content)
 
@@ -3654,7 +3671,7 @@ class RightPanel(QWidget):
         super().__init__(parent)
         self.setFixedWidth(320)
         self.setStyleSheet(
-            f"background:{C_BG_RIGHT};"
+            f"background:{C_BG_RIGHT}; border-left:1px solid {C_BORDER_P};"
         )
         self._active_tab = "调整"
         self._active_layer = 0
@@ -6207,17 +6224,7 @@ class MainEditorWindow(QWidget):
         QShortcut(QKeySequence.StandardKey.Open, self, self._open_image)
         QShortcut(QKeySequence.StandardKey.Save, self, self._save_image)
         QShortcut(QKeySequence("Ctrl+Shift+E"), self, self._export_image)
-        tool_shortcuts = {
-            "V": "mouse-pointer",
-            "C": "crop",
-            "P": "pen-tool",
-            "B": "paintbrush",
-            "E": "eraser",
-            "T": "type",
-            "I": "pipette",
-            "S": "stamp",
-        }
-        for key, tool_name in tool_shortcuts.items():
+        for key, tool_name in editor_tool_shortcuts().items():
             QShortcut(
                 QKeySequence(key),
                 self,

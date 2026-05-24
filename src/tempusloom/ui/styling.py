@@ -14,6 +14,7 @@ PRIMARY_HOVER = "#5B8FF9"
 BG_APP        = "#181818"   # main window / grid area
 BG_TOPBAR     = "#252525"   # navigation bar
 BG_PANEL      = "#1e1e1e"   # sidebar & info panel
+BG_PANEL_ALT  = "#202020"   # subtly lifted panel bands
 BG_ITEM       = "#2c2c2c"   # toolbar chips, search box
 BG_ACTIVE     = "#1a3060"   # selected sidebar item, avatar
 BORDER        = "#333333"   # separators / horizontal lines
@@ -23,6 +24,13 @@ TEXT_SECONDARY= "#aaaaaa"
 TEXT_MUTED    = "#888888"
 TEXT_DIM      = "#777777"
 TEXT_WHITE    = "#ffffff"
+
+
+def gallery_section_boundary_tokens() -> dict[str, str]:
+    return {
+        "panel_border": BORDER_PANEL,
+        "panel_alt": BG_PANEL_ALT,
+    }
 
 
 STYLESHEET = f"""
@@ -171,7 +179,7 @@ QScrollBar:horizontal {{ height: 0; }}
 
 /* ── grid toolbar ─────────────────────────────────────────────────────────── */
 #gridToolbar {{
-    background-color: {BG_PANEL};
+    background-color: {BG_PANEL_ALT};
     border-bottom: 1px solid {BORDER_PANEL};
 }}
 #gridInfo {{
@@ -190,7 +198,9 @@ QScrollBar:horizontal {{ height: 0; }}
 #toolChip:hover {{ background-color: #363636; }}
 
 /* ── thumbnail grid ───────────────────────────────────────────────────────── */
-#gridArea {{ background-color: {BG_APP}; }}
+#gridArea {{
+    background-color: {BG_APP};
+}}
 #thumbName {{
     color: {TEXT_SECONDARY};
     font-size: 11px;

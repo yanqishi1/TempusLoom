@@ -29,6 +29,13 @@ def tag_filter_matches(tags: list[str], active_tag: str) -> bool:
     return active_tag in tags
 
 
+def toggled_tag_filter(clicked_tag: str, active_tag: str) -> str:
+    tag = clicked_tag.strip()
+    if tag and tag == active_tag:
+        return ""
+    return tag
+
+
 def neighboring_paths(paths: list[str], current_path: str, *, radius: int = 2) -> list[str]:
     """Return current path plus nearby paths for in-memory prefetching."""
     if current_path not in paths:
