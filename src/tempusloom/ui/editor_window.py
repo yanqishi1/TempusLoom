@@ -41,12 +41,14 @@ from tempusloom.core.library_store import LibraryAsset, LibraryStore
 from tempusloom.core.histogram_process import histogram_worker_main
 from tempusloom.agent import (
     AgentModelConfig,
-    AgentRequestContext,
+    AgentTurnResult,
+    CancelToken,
+    ColorAgent,
     PROVIDER_PRESETS,
-    TempusLoomColorAgent,
     load_agent_config,
     save_agent_config,
 )
+from tempusloom.agent.tools import ToolContext
 
 
 # ── design tokens ──────────────────────────────────────────────────────────────
@@ -2076,6 +2078,12 @@ class AIChatBox(QWidget):
         super().__init__(parent)
         self._busy = False
         self._latest_json_text = ""
+        self._stream_label: Optional[QLabel] = None
+        self._stream_text = ""
+        self._last_stream_had_text = False
+        self._thinking_dots = 0
+        self._thinking_timer = QTimer(self)
+        self._thinking_timer.timeout.connect(self._advance_thinking_animation)
         self.setFixedWidth(320)
         self.setMinimumWidth(300)
         self.setStyleSheet(
@@ -2292,7 +2300,15 @@ class AIChatBox(QWidget):
         self._send_btn.setEnabled(not busy)
         self._model_btn.setEnabled(not busy)
         self._settings_btn.setEnabled(not busy)
-        self._status_lbl.setText("AI 正在生成调色 JSON…" if busy else "等待你的风格描述")
+        if busy:
+            self._thinking_dots = 0
+            self._status_lbl.setText("AI 正在后台运行")
+            self._thinking_timer.start(450)
+            self.start_stream_message("正在分析图片和调色需求")
+        else:
+            self._thinking_timer.stop()
+            self._status_lbl.setText("等待你的风格描述")
+            self.finish_stream_message()
 
     def set_model_badge(self, text: str) -> None:
         self._model_btn.setText(text or "未配置模型")
@@ -2306,6 +2322,42 @@ class AIChatBox(QWidget):
 
     def add_assistant_message(self, text: str, json_text: Optional[str] = None) -> None:
         self._append_message("AI", text, is_user=False, json_text=json_text)
+
+    def start_stream_message(self, placeholder: str = "正在处理") -> None:
+        self._stream_text = ""
+        self._last_stream_had_text = False
+        self._stream_label = self._append_message(
+            "AI",
+            placeholder,
+            is_user=False,
+            return_text_label=True,
+        )
+
+    def append_stream_text(self, delta: str) -> None:
+        if not delta:
+            return
+        if self._stream_label is None:
+            self.start_stream_message("")
+        self._stream_text += delta
+        self._last_stream_had_text = True
+        self._stream_label.setText(self._stream_text)
+        QTimer.singleShot(0, self._scroll_to_bottom)
+
+    def finish_stream_message(self) -> None:
+        self._stream_label = None
+        self._stream_text = ""
+
+    def last_stream_had_text(self) -> bool:
+        return self._last_stream_had_text
+
+    def _advance_thinking_animation(self) -> None:
+        if not self._busy:
+            return
+        self._thinking_dots = (self._thinking_dots + 1) % 4
+        dots = "." * self._thinking_dots
+        self._status_lbl.setText(f"AI 正在后台运行{dots}")
+        if self._stream_label is not None and not self._stream_text:
+            self._stream_label.setText(f"正在分析图片和调色需求{dots}")
 
     def _submit(self) -> None:
         if self._busy:
@@ -2332,7 +2384,8 @@ class AIChatBox(QWidget):
         *,
         is_user: bool,
         json_text: Optional[str] = None,
-    ) -> None:
+        return_text_label: bool = False,
+    ) -> QLabel | None:
         row = QWidget()
         row_lo = QHBoxLayout(row)
         row_lo.setContentsMargins(0, 0, 0, 0)
@@ -2379,6 +2432,7 @@ class AIChatBox(QWidget):
 
         self._thread_lo.insertWidget(self._thread_lo.count() - 1, row)
         QTimer.singleShot(0, self._scroll_to_bottom)
+        return text_lbl if return_text_label else None
 
     def _scroll_to_bottom(self) -> None:
         bar = self._thread_scroll.verticalScrollBar()
@@ -2390,7 +2444,7 @@ class AIAgentSettingsDialog(QDialog):
         "openai-compatible": ["gpt-4o", "gpt-4o-mini", "gpt-4.1-mini"],
         "anthropic": ["claude-3-5-sonnet-latest", "claude-3-5-haiku-latest"],
         "deepseek": ["deepseek-chat", "deepseek-reasoner"],
-        "kimi": ["moonshot-v1-8k", "moonshot-v1-32k"],
+        "kimi": ["kimi-k2.6", "moonshot-v1-8k", "moonshot-v1-32k"],
         "glm": ["glm-4-flash", "glm-4-plus"],
     }
 
@@ -2496,25 +2550,37 @@ class AIAgentSettingsDialog(QDialog):
         )
 
 
-class AgentRunWorker(QObject):
+class ColorAgentWorker(QObject):
+    """Worker that runs a single ColorAgent chat turn."""
     finished = pyqtSignal(object)
     failed = pyqtSignal(str)
+    stream_delta = pyqtSignal(str)
 
-    def __init__(self, config: AgentModelConfig, request_payload: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        agent: ColorAgent,
+        session_id: str,
+        user_text: str,
+        request_payload: dict[str, Any],
+        cancel_token: CancelToken,
+    ) -> None:
         super().__init__()
-        self._config = config
+        self._agent = agent
+        self._session_id = session_id
+        self._user_text = user_text
         self._request_payload = request_payload
+        self._cancel_token = cancel_token
 
     def run(self) -> None:
         try:
-            agent = TempusLoomColorAgent(self._config)
-            context = AgentRequestContext(
-                image=self._request_payload["image"],
-                style_prompt=str(self._request_payload["style_prompt"]),
-                current_adjust=dict(self._request_payload.get("current_adjust", {})),
-                image_name=str(self._request_payload.get("image_name", "")),
+            result = self._agent.chat(
+                self._session_id,
+                self._user_text,
+                self._request_payload,
+                stream_callback=self.stream_delta.emit,
+                cancel_token=self._cancel_token,
             )
-            self.finished.emit(agent.run_single_turn(context))
+            self.finished.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -5755,9 +5821,13 @@ class MainEditorWindow(QWidget):
         self._active_mask_layer_id: Optional[str] = None
         self._last_ai_request_payload: Optional[dict[str, Any]] = None
         self._last_ai_response_payload: Optional[dict[str, Any]] = None
+        self._last_ai_payload_by_image: dict[str, dict[str, Any]] = {}
         self._agent_thread: Optional[QThread] = None
-        self._agent_worker: Optional[AgentRunWorker] = None
+        self._agent_worker: Optional[ColorAgentWorker] = None
+        self._agent_cancel_token: Optional[CancelToken] = None
         self._pending_ai_prompt = ""
+        self._color_agent: Optional[ColorAgent] = None
+        self._agent_session_id: Optional[str] = None
         self._export_thread: Optional[QThread] = None
         self._export_worker: Optional[ExportWorker] = None
         self._export_progress_dialog: Optional[ExportProgressDialog] = None
@@ -5924,6 +5994,7 @@ class MainEditorWindow(QWidget):
         self._canvas.set_pixmaps(edited_pixmap, original_pixmap, reset_view=True)
         self._canvas.set_original_image_size(*tl_image.image_size())
         self._ai_chatbox.set_image_context(Path(path).name)
+        self._reset_agent_session()
         self._sync_right_panel_from_tlimage()
         self._right_panel.set_histogram_data(None)
         self._request_histogram_refresh(immediate=True)
@@ -6622,6 +6693,8 @@ class MainEditorWindow(QWidget):
         self._agent_config = dialog.selected_config(self._agent_config)
         save_agent_config(self._agent_config)
         self._ai_chatbox.set_model_badge(self._agent_config.display_name())
+        if self._color_agent is not None:
+            self._color_agent.update_config(self._agent_config)
         self._ai_chatbox.add_assistant_message(
             f"已保存模型配置：{self._agent_config.display_name()}"
         )
@@ -6636,13 +6709,15 @@ class MainEditorWindow(QWidget):
             return
         if not self._agent_config.is_configured():
             self._ai_chatbox.add_assistant_message(
-                "请先点击“设置”，填写 Base URL、API Key 和模型名称，然后再发起调色请求。"
+                '请先点击「设置」，填写 Base URL、API Key 和模型名称，然后再发起调色请求。'
             )
             self._open_ai_settings_dialog()
             return
         if self._agent_thread is not None:
             self._ai_chatbox.add_assistant_message("上一个请求还在处理中，请稍候。")
             return
+
+        self._ensure_color_agent()
 
         try:
             request_payload = self._build_ai_request_payload(prompt)
@@ -6651,57 +6726,89 @@ class MainEditorWindow(QWidget):
             self._ai_chatbox.add_assistant_message(f"生成调色 JSON 失败：{exc}")
             return
 
+        image_meta = request_payload["image"]
+        self._ai_chatbox.add_assistant_message(
+            f"请求已发送：{image_meta['width']} × {image_meta['height']} 预览图，约 {image_meta['byte_size'] // 1024} KB。"
+        )
         self._pending_ai_prompt = prompt.strip()
         self._ai_chatbox.set_busy(True)
+        self._agent_cancel_token = CancelToken()
         self._agent_thread = QThread(self)
-        self._agent_worker = AgentRunWorker(self._agent_config, request_payload)
+        self._agent_worker = ColorAgentWorker(
+            self._color_agent,
+            self._agent_session_id,
+            prompt.strip(),
+            request_payload,
+            self._agent_cancel_token,
+        )
         self._agent_worker.moveToThread(self._agent_thread)
         self._agent_thread.started.connect(self._agent_worker.run)
         self._agent_thread.finished.connect(self._agent_worker.deleteLater)
         self._agent_worker.finished.connect(self._on_ai_agent_finished)
         self._agent_worker.failed.connect(self._on_ai_agent_failed)
+        self._agent_worker.stream_delta.connect(self._on_ai_agent_stream_delta)
         self._agent_worker.finished.connect(self._cleanup_ai_agent_thread)
         self._agent_worker.failed.connect(self._cleanup_ai_agent_thread)
         self._agent_thread.start()
 
-        image_meta = request_payload["image"]
-        self._ai_chatbox.add_assistant_message(
-            f"请求已发送：{image_meta['width']} × {image_meta['height']} 预览图，约 {image_meta['byte_size'] // 1024} KB。"
-        )
+    def _on_ai_agent_stream_delta(self, delta: str) -> None:
+        self._ai_chatbox.append_stream_text(delta)
 
     def _on_ai_agent_finished(self, result: object) -> None:
         self._ai_chatbox.set_busy(False)
-        if not hasattr(result, "payload"):
-            self._ai_chatbox.add_assistant_message("AI 返回结果格式异常。")
+
+        if isinstance(result, AgentTurnResult):
+            self._handle_color_agent_result(result)
             return
-        response_payload = result.payload
-        self._last_ai_response_payload = response_payload
-        self._ai_chatbox.set_latest_response_json(response_payload)
 
-        applied = False
-        apply_error = ""
-        if self._current_tlimage is not None:
-            try:
-                self._current_tlimage.apply_agent_json_payload(
-                    response_payload,
-                    record_history=True,
-                    description=f"AI 调色 · {self._pending_ai_prompt[:24]}",
-                )
-                self._refresh_canvas_from_tlimage(sync_panel=True)
-                self._persist_current_library_edit_state()
-                applied = True
-            except Exception as exc:
-                apply_error = str(exc)
+        self._ai_chatbox.add_assistant_message("AI 返回结果格式异常。")
 
-        summary = f"{self._agent_config.display_name()} 已返回调色 JSON"
-        if applied:
-            summary += "，并已自动应用到当前图片。"
-        elif apply_error:
-            summary += f"，但应用失败：{apply_error}"
-        self._ai_chatbox.add_assistant_message(
-            summary,
-            json.dumps(response_payload, ensure_ascii=False, indent=2),
-        )
+    def _handle_color_agent_result(self, result: AgentTurnResult) -> None:
+        """Handle a result from ColorAgent."""
+        if result.cancelled:
+            self._ai_chatbox.add_assistant_message("已取消本次 AI 调色请求。")
+            return
+        if not result.success:
+            error_text = "；".join(result.errors) if result.errors else "未知错误"
+            self._ai_chatbox.add_assistant_message(f"调色失败：{error_text}")
+            return
+
+        assistant_msg = result.message or "调色完成。"
+        if result.edit_ids:
+            self._refresh_canvas_from_tlimage(sync_panel=True)
+            self._persist_current_library_edit_state()
+            assistant_msg += "，已应用到当前图片。"
+        elif result.payload:
+            self._remember_ai_payload(result.payload)
+            self._ai_chatbox.set_latest_response_json(result.payload)
+            if self._current_tlimage is not None:
+                try:
+                    self._current_tlimage.apply_agent_json_payload(
+                        result.payload,
+                        record_history=True,
+                        description=f"AI 调色 · {self._pending_ai_prompt[:24]}",
+                    )
+                    self._refresh_canvas_from_tlimage(sync_panel=True)
+                    self._persist_current_library_edit_state()
+                    assistant_msg += "，并已自动应用到当前图片。"
+                except Exception as exc:
+                    assistant_msg += f"，但应用失败：{exc}"
+
+        json_text = json.dumps(result.payload, ensure_ascii=False, indent=2) if result.payload else None
+        if result.payload:
+            self._ai_chatbox.add_assistant_message(assistant_msg, json_text)
+        elif not self._ai_chatbox.last_stream_had_text():
+            self._ai_chatbox.add_assistant_message(assistant_msg)
+
+        for record in result.tool_calls:
+            if isinstance(record.result, dict):
+                payload = record.result.get("payload")
+                if isinstance(payload, dict):
+                    self._remember_ai_payload(payload)
+            if record.success:
+                self._ai_chatbox.add_assistant_message(f"工具 {record.tool_name} 执行成功。")
+            else:
+                self._ai_chatbox.add_assistant_message(f"工具 {record.tool_name} 失败：{record.error or '未知错误'}")
 
     def _on_ai_agent_failed(self, error: str) -> None:
         self._ai_chatbox.set_busy(False)
@@ -6714,17 +6821,96 @@ class MainEditorWindow(QWidget):
             self._agent_thread.deleteLater()
         self._agent_thread = None
         self._agent_worker = None
+        self._agent_cancel_token = None
 
     def _build_ai_request_payload(self, prompt: str) -> dict[str, Any]:
         if self._current_tlimage is None:
             raise RuntimeError("No TLImage loaded")
         compressed = self._compress_current_preview_for_ai(self._current_tlimage)
+        image_key = str(self._current_tlimage.image_path)
         return {
             "image": compressed,
             "style_prompt": prompt,
             "current_adjust": self._current_tlimage.to_json_dict(),
+            "previous_ai_payload": self._last_ai_payload_by_image.get(image_key, {}),
             "image_name": Path(self._current_tlimage.image_path).name,
         }
+
+    def _remember_ai_payload(self, payload: dict[str, Any]) -> None:
+        if self._current_tlimage is None or not isinstance(payload, dict):
+            return
+        image_key = str(self._current_tlimage.image_path)
+        copied = deepcopy(payload)
+        self._last_ai_payload_by_image[image_key] = copied
+        self._last_ai_response_payload = copied
+
+    def _ensure_color_agent(self) -> None:
+        """Ensure ColorAgent is initialized and has a session for the current image."""
+        tl = self._current_tlimage
+        if tl is None:
+            return
+        image_id = str(tl.image_path)
+
+        if self._color_agent is None:
+            self._color_agent = ColorAgent(self._agent_config)
+            self._setup_color_agent_callbacks()
+
+        if self._agent_session_id is None:
+            self._agent_session_id = image_id
+
+    def _setup_color_agent_callbacks(self) -> None:
+        """Wire ColorAgent tools to the TempusLoom image engine."""
+        if self._color_agent is None:
+            return
+
+        def apply_payload(
+            payload: dict[str, Any],
+            description: str = "",
+        ) -> str:
+            if self._current_tlimage is None:
+                raise RuntimeError("No TLImage loaded")
+            desc = description or f"AI 调色 · {self._pending_ai_prompt[:24]}"
+            self._current_tlimage.apply_agent_json_payload(
+                payload,
+                record_history=True,
+                description=desc,
+            )
+            return f"edit-{id(payload):x}"[:24]
+
+        def undo_last_edit() -> bool:
+            if self._current_tlimage is None:
+                return False
+            try:
+                self._current_tlimage.undo()
+                return True
+            except Exception:
+                return False
+
+        def build_context(
+            session_id: str,
+            image: dict[str, Any] | None,
+            cancel_token: CancelToken | None,
+        ) -> ToolContext:
+            current_adjust = None
+            if self._current_tlimage is not None:
+                current_adjust = self._current_tlimage.to_json_dict()
+            return ToolContext(
+                session_id=session_id,
+                image=image,
+                current_adjust=current_adjust,
+                cancel_token=cancel_token,
+                workspace=str(Path.cwd()),
+                apply_payload=apply_payload,
+                undo_last_edit=undo_last_edit,
+            )
+
+        self._color_agent.set_tool_context_factory(build_context)
+
+    def _reset_agent_session(self) -> None:
+        """Reset the agent session, typically when switching images."""
+        if self._color_agent is not None and self._agent_session_id is not None:
+            self._color_agent.end_session(self._agent_session_id)
+        self._agent_session_id = None
 
     def _compress_current_preview_for_ai(self, tl_image: TLImage) -> dict[str, Any]:
         preview_image = tl_image.render_image(preview=True, max_dimension=self._preview_max_dimension())
@@ -6752,6 +6938,9 @@ class MainEditorWindow(QWidget):
         if self._filmstrip_store is not None:
             self._filmstrip_store.close()
             self._filmstrip_store = None
+        if self._color_agent is not None:
+            self._color_agent.close()
+            self._color_agent = None
         self._shutdown_histogram_process()
         super().closeEvent(event)
 
