@@ -113,7 +113,10 @@ class OpenAICompatibleClient(BaseLLMClient):
             elif message.role == MessageRole.USER:
                 api_messages.append({"role": "user", "content": self._user_content(message)})
             elif message.role == MessageRole.ASSISTANT:
-                item: dict[str, Any] = {"role": "assistant", "content": message.content or None}
+                content = message.content or ""
+                if not content.strip() and not message.tool_calls:
+                    continue
+                item: dict[str, Any] = {"role": "assistant", "content": content}
                 if message.tool_calls:
                     item["tool_calls"] = [self._tool_call_to_openai(tool_call) for tool_call in message.tool_calls]
                     reasoning_content = self._reasoning_content_for_message(message)

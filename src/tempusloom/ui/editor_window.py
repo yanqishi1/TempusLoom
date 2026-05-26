@@ -19,6 +19,7 @@ from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import (
     Qt, QSize, QRectF, QPointF, QThread, QTimer, QObject, pyqtSignal,
+    QThreadPool, QRunnable,
 )
 from PyQt6.QtGui import (
     QColor, QPainter, QPainterPath, QBrush, QPen,
@@ -37,6 +38,7 @@ from .editor_icons import icon_pixmap
 from PIL import Image, ImageOps
 from PIL.ImageQt import ImageQt
 from tempusloom.core import LibraryProjectIndex, Mask, TLImage
+from tempusloom.core.gallery_navigation import neighboring_paths
 from tempusloom.core.library_store import LibraryAsset, LibraryStore
 from tempusloom.core.histogram_process import histogram_worker_main
 from tempusloom.agent import (
@@ -275,6 +277,68 @@ class ExportWorker(QObject):
 
     def _emit_progress(self, value: int, message: str) -> None:
         self.progress_changed.emit(value, message)
+
+
+class ImageOpenResult:
+    def __init__(
+        self,
+        path: str,
+        tl_image: TLImage,
+        edited_image: Image.Image,
+        original_image: Image.Image,
+    ) -> None:
+        self.path = path
+        self.tl_image = tl_image
+        self.edited_image = edited_image
+        self.original_image = original_image
+
+
+class ImageOpenWorker(QObject):
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str, str)
+
+    def __init__(self, path: str, preview_max_dimension: int) -> None:
+        super().__init__()
+        self._path = path
+        self._preview_max_dimension = preview_max_dimension
+
+    def run(self) -> None:
+        try:
+            persisted = LibraryProjectIndex().load_edit_state_for_asset_path(self._path)
+            tl_image = TLImage.from_dict(persisted) if persisted else TLImage.open(self._path)
+            if str(Path(tl_image.image_path).expanduser().resolve()) != str(Path(self._path).expanduser().resolve()):
+                tl_image.image_path = self._path
+            edited_image = tl_image.render_image(preview=True, max_dimension=self._preview_max_dimension)
+            original_image = tl_image.load_image(preview=True, max_dimension=self._preview_max_dimension)
+            self.finished.emit(ImageOpenResult(self._path, tl_image, edited_image, original_image))
+        except Exception as exc:
+            self.failed.emit(self._path, str(exc))
+
+
+class FilmstripPrefetchSignals(QObject):
+    loaded = pyqtSignal(object)  # ImageOpenResult
+
+
+class FilmstripPrefetchWorker(QRunnable):
+    """Background-load a TLImage for filmstrip neighbour prefetching."""
+
+    def __init__(self, path: str, preview_max_dimension: int) -> None:
+        super().__init__()
+        self._path = path
+        self._preview_max_dimension = preview_max_dimension
+        self.signals = FilmstripPrefetchSignals()
+
+    def run(self) -> None:
+        try:
+            persisted = LibraryProjectIndex().load_edit_state_for_asset_path(self._path)
+            tl_image = TLImage.from_dict(persisted) if persisted else TLImage.open(self._path)
+            if str(Path(tl_image.image_path).expanduser().resolve()) != str(Path(self._path).expanduser().resolve()):
+                tl_image.image_path = self._path
+            edited_image = tl_image.render_image(preview=True, max_dimension=self._preview_max_dimension)
+            original_image = tl_image.load_image(preview=True, max_dimension=self._preview_max_dimension)
+            self.signals.loaded.emit(ImageOpenResult(self._path, tl_image, edited_image, original_image))
+        except Exception:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1076,6 +1140,15 @@ class CanvasArea(QWidget):
 
     def set_pixmap(self, px: QPixmap, *, reset_view: bool = False) -> None:
         self.set_pixmaps(px, reset_view=reset_view)
+
+    def show_loading_message(self, message: str) -> None:
+        self._edited_pixmap = None
+        self._original_pixmap = None
+        self._compare_mode = False
+        self._compare_btn.hide()
+        self._placeholder.setText(message)
+        self._placeholder.show()
+        self.update()
 
     def _fit_to_window(self) -> None:
         px = self._base_pixmap()
@@ -5828,6 +5901,9 @@ class MainEditorWindow(QWidget):
         self._pending_ai_prompt = ""
         self._color_agent: Optional[ColorAgent] = None
         self._agent_session_id: Optional[str] = None
+        self._image_open_thread: Optional[QThread] = None
+        self._image_open_worker: Optional[ImageOpenWorker] = None
+        self._pending_image_open_path = ""
         self._export_thread: Optional[QThread] = None
         self._export_worker: Optional[ExportWorker] = None
         self._export_progress_dialog: Optional[ExportProgressDialog] = None
@@ -5863,6 +5939,12 @@ class MainEditorWindow(QWidget):
         self._filmstrip_rating_filter_mode = "all"
         self._filmstrip_rating_filter_value = 0
         self._filmstrip_tag_filter = ""
+        self._filmstrip_prefetch_radius = 2
+        self._filmstrip_prefetch_limit = 7
+        self._filmstrip_prefetch_cache: dict[str, ImageOpenResult] = {}
+        self._filmstrip_prefetch_loading: set[str] = set()
+        self._filmstrip_prefetch_pool = QThreadPool()
+        self._filmstrip_prefetch_pool.setMaxThreadCount(2)
         self.setStyleSheet(f"background:{C_BG_APP};")
         self._build_ui()
         self._connect_signals()
@@ -6001,7 +6083,72 @@ class MainEditorWindow(QWidget):
         self.title_changed.emit(f"TempusLoom - {Path(path).name}")
         self._status_bar.set_image_info(*tl_image.image_size())
         self._load_filmstrip_for_image(path)
+        self._prefetch_filmstrip_neighbors(path)
         return True
+
+    def open_image_async(self, path: str) -> None:
+        if not path:
+            return
+        if self._image_open_thread is not None:
+            self._image_open_thread.quit()
+            self._image_open_thread.wait(1000)
+            self._cleanup_image_open_worker()
+        self._pending_image_open_path = path
+        self._current_tlimage = None
+        self._active_mask_layer_id = None
+        self._original_preview_cache_key = None
+        self._original_preview_pixmap = None
+        self._right_panel.set_histogram_data(None)
+        self._ai_chatbox.set_image_context(Path(path).name)
+        self._canvas.show_loading_message(f"正在打开 {Path(path).name}…")
+        self.title_changed.emit(f"TempusLoom - {Path(path).name}")
+
+        self._image_open_thread = QThread(self)
+        self._image_open_worker = ImageOpenWorker(path, self._preview_max_dimension())
+        self._image_open_worker.moveToThread(self._image_open_thread)
+        self._image_open_thread.started.connect(self._image_open_worker.run)
+        self._image_open_worker.finished.connect(self._on_image_open_finished)
+        self._image_open_worker.failed.connect(self._on_image_open_failed)
+        self._image_open_worker.finished.connect(self._image_open_thread.quit)
+        self._image_open_worker.failed.connect(self._image_open_thread.quit)
+        self._image_open_worker.finished.connect(self._image_open_worker.deleteLater)
+        self._image_open_worker.failed.connect(self._image_open_worker.deleteLater)
+        self._image_open_thread.finished.connect(self._cleanup_image_open_worker)
+        self._image_open_thread.finished.connect(self._image_open_thread.deleteLater)
+        self._image_open_thread.start()
+
+    def _on_image_open_finished(self, result: object) -> None:
+        if not isinstance(result, ImageOpenResult):
+            return
+        if result.path != self._pending_image_open_path:
+            return
+        tl_image = result.tl_image
+        preview_max_dimension = self._preview_max_dimension()
+        edited_pixmap = self._pil_to_pixmap(result.edited_image)
+        original_pixmap = self._pil_to_pixmap(result.original_image)
+
+        self._current_tlimage = tl_image
+        self._active_mask_layer_id = None
+        self._original_preview_cache_key = (tl_image.image_path, preview_max_dimension)
+        self._original_preview_pixmap = original_pixmap
+        self._canvas.set_pixmaps(edited_pixmap, original_pixmap, reset_view=True)
+        self._canvas.set_original_image_size(*tl_image.image_size())
+        self._reset_agent_session()
+        self._sync_right_panel_from_tlimage()
+        self._right_panel.set_histogram_data(None)
+        self._request_histogram_refresh(immediate=True)
+        self._status_bar.set_image_info(*tl_image.image_size())
+        self._load_filmstrip_for_image(result.path)
+        self._prefetch_filmstrip_neighbors(result.path)
+
+    def _on_image_open_failed(self, path: str, error: str) -> None:
+        if path != self._pending_image_open_path:
+            return
+        self._canvas.show_loading_message(f"无法打开 {Path(path).name}\n\n{error}")
+
+    def _cleanup_image_open_worker(self) -> None:
+        self._image_open_worker = None
+        self._image_open_thread = None
 
     def _persist_current_library_edit_state(self) -> None:
         if self._current_tlimage is None:
@@ -6012,6 +6159,7 @@ class MainEditorWindow(QWidget):
         )
 
     def _load_filmstrip_for_image(self, path: str) -> None:
+        old_store_path = str(self._filmstrip_store.library_path) if self._filmstrip_store else ""
         if self._filmstrip_store is not None:
             self._filmstrip_store.close()
             self._filmstrip_store = None
@@ -6021,7 +6169,13 @@ class MainEditorWindow(QWidget):
             self._filmstrip.load_assets([], "")
             self._filmstrip.set_tag_options([])
             self._filmstrip.set_current_metadata(0, [])
+            self._filmstrip_prefetch_cache.clear()
+            self._filmstrip_prefetch_loading.clear()
             return
+        new_store_path = str(store.library_path)
+        if new_store_path != old_store_path:
+            self._filmstrip_prefetch_cache.clear()
+            self._filmstrip_prefetch_loading.clear()
         self._filmstrip_store = store
         self._reload_filmstrip_assets(current_path=asset.path)
         self._sync_filmstrip_current_metadata(asset.path)
@@ -6055,7 +6209,76 @@ class MainEditorWindow(QWidget):
         if not path:
             return
         self._persist_current_library_edit_state()
-        self.open_image(path)
+        cached = self._filmstrip_prefetch_cache.pop(path, None)
+        if cached is not None:
+            self._apply_cached_filmstrip_image(cached)
+        else:
+            self.open_image(path)
+
+    def _apply_cached_filmstrip_image(self, result: ImageOpenResult) -> None:
+        """Apply a prefetched ImageOpenResult directly without re-loading."""
+        preview_max_dimension = self._preview_max_dimension()
+        edited_pixmap = self._pil_to_pixmap(result.edited_image)
+        original_pixmap = self._pil_to_pixmap(result.original_image)
+        self._current_tlimage = result.tl_image
+        self._active_mask_layer_id = None
+        self._original_preview_cache_key = (result.tl_image.image_path, preview_max_dimension)
+        self._original_preview_pixmap = original_pixmap
+        self._canvas.set_pixmaps(edited_pixmap, original_pixmap, reset_view=True)
+        self._canvas.set_original_image_size(*result.tl_image.image_size())
+        self._ai_chatbox.set_image_context(Path(result.path).name)
+        self._reset_agent_session()
+        self._sync_right_panel_from_tlimage()
+        self._right_panel.set_histogram_data(None)
+        self._request_histogram_refresh(immediate=True)
+        self.title_changed.emit(f"TempusLoom - {Path(result.path).name}")
+        self._status_bar.set_image_info(*result.tl_image.image_size())
+        self._load_filmstrip_for_image(result.path)
+        self._prefetch_filmstrip_neighbors(result.path)
+
+    def _prefetch_filmstrip_neighbors(self, current_path: str) -> None:
+        """Kick off background loading for images adjacent to *current_path*."""
+        if not self._filmstrip_assets:
+            return
+        paths = [asset.path for asset in self._filmstrip_assets]
+        targets = neighboring_paths(paths, current_path, radius=self._filmstrip_prefetch_radius)
+        for target in targets:
+            if target == current_path:
+                continue
+            if target in self._filmstrip_prefetch_cache or target in self._filmstrip_prefetch_loading:
+                continue
+            self._filmstrip_prefetch_loading.add(target)
+            worker = FilmstripPrefetchWorker(target, self._preview_max_dimension())
+            worker.signals.loaded.connect(self._on_filmstrip_prefetch_loaded)
+            self._filmstrip_prefetch_pool.start(worker)
+        self._prune_filmstrip_prefetch_cache(keep_paths=targets)
+
+    def _on_filmstrip_prefetch_loaded(self, result: object) -> None:
+        if not isinstance(result, ImageOpenResult):
+            return
+        self._filmstrip_prefetch_loading.discard(result.path)
+        self._filmstrip_prefetch_cache[result.path] = result
+        self._prune_filmstrip_prefetch_cache()
+
+    def _prune_filmstrip_prefetch_cache(self, keep_paths: Optional[list[str]] = None) -> None:
+        """Evict stale or excess entries from the prefetch cache."""
+        valid = {asset.path for asset in self._filmstrip_assets}
+        for cached_path in list(self._filmstrip_prefetch_cache):
+            if cached_path not in valid:
+                self._filmstrip_prefetch_cache.pop(cached_path, None)
+        if len(self._filmstrip_prefetch_cache) <= self._filmstrip_prefetch_limit:
+            return
+        keep = set(keep_paths or neighboring_paths(
+            [asset.path for asset in self._filmstrip_assets],
+            self._current_tlimage.image_path if self._current_tlimage else "",
+            radius=self._filmstrip_prefetch_radius,
+        ))
+        for cached_path in list(self._filmstrip_prefetch_cache):
+            if cached_path in keep:
+                continue
+            self._filmstrip_prefetch_cache.pop(cached_path, None)
+            if len(self._filmstrip_prefetch_cache) <= self._filmstrip_prefetch_limit:
+                break
 
     def _set_filmstrip_rating(self, path: str, rating: int) -> None:
         if not self._filmstrip_store:
@@ -6828,12 +7051,14 @@ class MainEditorWindow(QWidget):
             raise RuntimeError("No TLImage loaded")
         compressed = self._compress_current_preview_for_ai(self._current_tlimage)
         image_key = str(self._current_tlimage.image_path)
+        compressed["file_path"] = self._current_tlimage.image_path
         return {
             "image": compressed,
             "style_prompt": prompt,
             "current_adjust": self._current_tlimage.to_json_dict(),
             "previous_ai_payload": self._last_ai_payload_by_image.get(image_key, {}),
             "image_name": Path(self._current_tlimage.image_path).name,
+            "image_path": self._current_tlimage.image_path,
         }
 
     def _remember_ai_payload(self, payload: dict[str, Any]) -> None:
@@ -6929,6 +7154,9 @@ class MainEditorWindow(QWidget):
         }
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self._image_open_thread is not None:
+            event.ignore()
+            return
         if self._export_thread is not None:
             event.ignore()
             return
@@ -6938,6 +7166,9 @@ class MainEditorWindow(QWidget):
         if self._filmstrip_store is not None:
             self._filmstrip_store.close()
             self._filmstrip_store = None
+        self._filmstrip_prefetch_cache.clear()
+        self._filmstrip_prefetch_loading.clear()
+        self._filmstrip_prefetch_pool.clear()
         if self._color_agent is not None:
             self._color_agent.close()
             self._color_agent = None

@@ -120,6 +120,7 @@ class ColorAgent:
         try:
             token.check()
             messages = self._get_session_messages(session_id)
+            self._strip_historical_image_payloads(messages)
             user_llm_message = LLMMessage(
                 role=MessageRole.USER,
                 content=self._build_chat_user_content(user_message, image),
@@ -354,14 +355,35 @@ class ColorAgent:
         ]
 
     @staticmethod
+    def _strip_historical_image_payloads(messages: list[LLMMessage]) -> None:
+        for message in messages:
+            image_paths = [image.file_path for image in message.images if image.file_path]
+            if image_paths and "Historical image paths:" not in message.content:
+                message.content = (
+                    f"{message.content}\n\n"
+                    f"Historical image paths: {json.dumps(image_paths, ensure_ascii=False)}"
+                ).strip()
+            for image in message.images:
+                image.data_base64 = ""
+            message.images = []
+
+    @staticmethod
     def _image_metadata_for_log(image: dict[str, Any] | None) -> dict[str, Any]:
         if not image:
             return {}
-        return {
-            key: value
-            for key, value in image.items()
-            if key not in {"base64", "data"}
-        }
+        return ColorAgent._without_binary_image_data(image)
+
+    @staticmethod
+    def _without_binary_image_data(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: ColorAgent._without_binary_image_data(item)
+                for key, item in value.items()
+                if key not in {"base64", "data", "data_base64"}
+            }
+        if isinstance(value, list):
+            return [ColorAgent._without_binary_image_data(item) for item in value]
+        return value
 
     @staticmethod
     def _normalize_image_dict(image: dict[str, Any] | None) -> dict[str, Any]:
@@ -383,7 +405,12 @@ class ColorAgent:
             "byteSize": (image.get("image") or {}).get("byte_size") if isinstance(image.get("image"), dict) else image.get("byte_size"),
             "mimeType": (image.get("image") or {}).get("mime_type") if isinstance(image.get("image"), dict) else image.get("mime_type"),
         }
+        baseline_note = (
+            "Current edit parameters below are the mandatory baseline for this turn; "
+            "modify on top of them instead of reverting to the original image or older parameters.\n\n"
+        )
         return (
+            f"{baseline_note}"
             f"用户需求：{user_message.strip()}\n\n"
             "重要上下文：本轮附带图片是当前已渲染结果，不是原始未调色图片；"
             "如果用户要求继续微调，请基于当前渲染结果、当前编辑状态和上一次 AI 调色参数继续调整。\n\n"

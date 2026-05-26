@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from PyQt6.QtCore import (
     Qt, QSize, QPointF, QPropertyAnimation, QEasingCurve, QAbstractAnimation,
-    pyqtSignal,
+    QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QColor, QPainter, QPainterPath, QBrush, QPen,
@@ -595,9 +595,9 @@ class TempusLoomWindow(QMainWindow):
         self._switch_to(idx)                 # animated content swap
 
     def _on_open_in_editor(self, path: str) -> None:
-        if path:
-            self._editor.open_image(path)
         self._on_mode("editor")
+        if path:
+            QTimer.singleShot(0, lambda p=path: self._editor.open_image_async(p))
 
     # ── cross-fade ─────────────────────────────────────────────────────────────
     def _switch_to(self, idx: int) -> None:
