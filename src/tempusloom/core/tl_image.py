@@ -917,9 +917,12 @@ class TLImage:
             self._replace_layers_from_state(layers_state)
 
         primary_adjustment = self.get_primary_malayer_for_tab(EditorTab.ADJUST)
-        if primary_adjustment is None and not has_explicit_layers:
-            primary_adjustment = self._ensure_primary_adjustment_layer()
         adjust_state = self.edit_state.get("adjust", {})
+        has_adjustments = isinstance(adjust_state, dict) and any(
+            isinstance(v, dict) and v for v in adjust_state.values()
+        )
+        if primary_adjustment is None and (not has_explicit_layers or has_adjustments):
+            primary_adjustment = self._ensure_primary_adjustment_layer()
         if isinstance(adjust_state, dict) and isinstance(primary_adjustment, AdjustmentMalayer):
             self._apply_adjust_delta(primary_adjustment, adjust_state)
 
@@ -932,9 +935,12 @@ class TLImage:
 
         has_explicit_layers = isinstance(self.edit_state.get("layers"), list)
         primary_adjustment = self.get_primary_malayer_for_tab(EditorTab.ADJUST)
-        if primary_adjustment is None and not has_explicit_layers:
+        adjust_state = normalized.get("adjust") or self.edit_state.get("adjust", {})
+        has_adjustments = isinstance(adjust_state, dict) and any(
+            isinstance(v, dict) and v for v in adjust_state.values()
+        )
+        if primary_adjustment is None and (not has_explicit_layers or has_adjustments):
             primary_adjustment = self._ensure_primary_adjustment_layer()
-        adjust_state = normalized.get("adjust")
         if isinstance(adjust_state, dict) and isinstance(primary_adjustment, AdjustmentMalayer):
             self._apply_adjust_delta(primary_adjustment, adjust_state)
 
