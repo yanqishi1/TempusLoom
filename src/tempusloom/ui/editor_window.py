@@ -11,6 +11,7 @@ import io
 import json
 import os
 import math
+import tempfile
 import multiprocessing as mp
 from copy import deepcopy
 from pathlib import Path
@@ -51,6 +52,21 @@ from tempusloom.agent import (
     save_agent_config,
 )
 from tempusloom.agent.tools import ToolContext
+
+try:
+    import cv2
+except Exception:
+    cv2 = None
+
+try:
+    import numpy as np
+except Exception:
+    np = None
+
+try:
+    import onnxruntime as ort
+except Exception:
+    ort = None
 
 
 # ── design tokens ──────────────────────────────────────────────────────────────
@@ -118,6 +134,26 @@ def editor_tool_sidebar_chrome() -> dict[str, str]:
     }
 
 
+def editor_mask_tool_definitions() -> list[dict[str, Any]]:
+    return [
+        {"key": "linear", "label": "Linear", "tool_name": "mask-linear", "enabled": True, "mode": "drag"},
+        {"key": "radial", "label": "Radial", "tool_name": "mask-radial", "enabled": True, "mode": "drag"},
+        {"key": "portrait", "label": "人像蒙版", "tool_name": "portrait-mask", "enabled": True, "mode": "action"},
+        {"key": "ai", "label": "AI", "tool_name": "wand-2", "enabled": False, "mode": "action"},
+    ]
+
+
+def editor_right_panel_layout_tokens() -> dict[str, Any]:
+    return {
+        "fixed_width": False,
+        "min_width": 300,
+        "max_width": 344,
+        "horizontal_scroll": False,
+        "adjust_color_wheel_size": 258,
+        "mask_color_wheel_size": 196,
+    }
+
+
 def _lbl(text: str, color: str = C_TEXT_3, size: int = 12,
          weight: QFont.Weight = QFont.Weight.Normal) -> QLabel:
     lb = QLabel(text)
@@ -150,6 +186,15 @@ def _icon_btn(icon_name: str, icon_size: int = 16, btn_size: int = 32,
 def _qicon(icon_name: str, size: int, color: str):
     from PyQt6.QtGui import QIcon
     return QIcon(icon_pixmap(icon_name, size, color))
+
+
+def _panel_menu_style() -> str:
+    return (
+        f"QMenu{{background:{C_BG_ITEM}; color:{C_TEXT_1}; border:1px solid {C_BORDER};"
+        "border-radius:6px; padding:4px;}}"
+        "QMenu::item{padding:6px 22px 6px 10px; border-radius:4px;}"
+        "QMenu::item:selected{background:#343434;}"
+    )
 
 
 def _logo_pixmap(size: int = 24) -> QPixmap:
@@ -250,6 +295,127 @@ class ExportProgressDialog(QDialog):
 
     def reject(self) -> None:
         return
+
+
+class CircularProgressLabel(QLabel):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._value = 0
+        self.setFixedSize(16, 16)
+
+    def set_value(self, value: int) -> None:
+        next_value = max(0, min(100, int(value)))
+        if next_value == self._value:
+            return
+        self._value = next_value
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect().adjusted(2, 2, -2, -2)
+        p.setPen(QPen(QColor(C_BORDER), 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(rect)
+        if self._value > 0:
+            p.setPen(QPen(QColor(C_PRIMARY_H), 2))
+            span = int(-360 * 16 * (self._value / 100.0))
+            p.drawArc(rect, 90 * 16, span)
+        p.end()
+
+
+class PortraitMaskResult:
+    def __init__(self, mask_path: str, mask_values: dict[str, Any]) -> None:
+        self.mask_path = mask_path
+        self.mask_values = mask_values
+
+
+class PortraitMaskWorker(QObject):
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+    progress_changed = pyqtSignal(int)
+
+    def __init__(self, image_path: str, model_path: str, output_dir: str, ref_size: int = 512) -> None:
+        super().__init__()
+        self._image_path = image_path
+        self._model_path = model_path
+        self._output_dir = output_dir
+        self._ref_size = ref_size
+
+    def run(self) -> None:
+        try:
+            if cv2 is None or np is None or ort is None:
+                raise RuntimeError("缺少人像蒙版依赖，请安装 opencv-python、numpy、onnxruntime。")
+            self.progress_changed.emit(10)
+            image_bgr = cv2.imread(self._image_path, cv2.IMREAD_COLOR)
+            if image_bgr is None:
+                raise RuntimeError("无法读取当前图片，不能生成人像蒙版。")
+            if not Path(self._model_path).is_file():
+                raise RuntimeError(f"未找到 MODNet 模型文件：{self._model_path}")
+
+            self.progress_changed.emit(25)
+            session = ort.InferenceSession(self._model_path, providers=["CPUExecutionProvider"])
+            input_name = session.get_inputs()[0].name
+            tensor, (orig_h, orig_w) = self._preprocess_bgr(image_bgr, self._ref_size)
+
+            self.progress_changed.emit(55)
+            outputs = session.run(None, {input_name: tensor})
+            matte = np.squeeze(outputs[-1]).astype(np.float32)
+            matte = np.clip(matte, 0.0, 1.0)
+            matte = cv2.resize(matte, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+
+            self.progress_changed.emit(80)
+            output_dir = Path(self._output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            stem = Path(self._image_path).stem
+            fd, temp_path = tempfile.mkstemp(prefix=f"{stem}_portrait_mask_", suffix=".png", dir=str(output_dir))
+            os.close(fd)
+            matte_u8 = (matte * 255.0).round().astype(np.uint8)
+            Image.fromarray(matte_u8, mode="L").save(temp_path)
+
+            self.progress_changed.emit(100)
+            self.finished.emit(
+                PortraitMaskResult(
+                    temp_path,
+                    {
+                        "type": "image",
+                        "name": "人像蒙版",
+                        "image_path": temp_path,
+                        "opacity": 1.0,
+                        "invert": False,
+                    },
+                )
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+    @staticmethod
+    def _normalize_rgb(image: np.ndarray) -> np.ndarray:
+        image = image.astype(np.float32) / 255.0
+        image = (image - 0.5) / 0.5
+        return image
+
+    @classmethod
+    def _preprocess_bgr(cls, image_bgr: np.ndarray, ref_size: int) -> tuple[np.ndarray, tuple[int, int]]:
+        orig_h, orig_w = image_bgr.shape[:2]
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        im_h, im_w = image_rgb.shape[:2]
+        if max(im_h, im_w) < ref_size or min(im_h, im_w) > ref_size:
+            if im_w >= im_h:
+                im_rh = ref_size
+                im_rw = int(im_w / im_h * ref_size)
+            else:
+                im_rw = ref_size
+                im_rh = int(im_h / im_w * ref_size)
+        else:
+            im_rh = im_h
+            im_rw = im_w
+        im_rw = max(32, im_rw - im_rw % 32)
+        im_rh = max(32, im_rh - im_rh % 32)
+        resized = cv2.resize(image_rgb, (im_rw, im_rh), interpolation=cv2.INTER_AREA)
+        normalized = cls._normalize_rgb(resized)
+        tensor = np.transpose(normalized, (2, 0, 1))[None, ...].astype(np.float32)
+        return tensor, (orig_h, orig_w)
 
 
 class ExportWorker(QObject):
@@ -2701,17 +2867,21 @@ class LayerRow(QWidget):
 
     selected = pyqtSignal(int)
     visibility_toggled = pyqtSignal(int, bool)
+    delete_requested = pyqtSignal(str)
 
     def __init__(self, index: int, name: str, layer_type: str,
                  thumb_color: str, active: bool = False,
-                 locked: bool = False, parent=None) -> None:
+                 locked: bool = False, layer_id: str = "", parent=None) -> None:
         super().__init__(parent)
         self._index      = index
+        self._layer_id   = layer_id
         self._active     = active
         self._visible    = True
         self._locked     = locked
         self.setFixedHeight(38)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
         self._build(name, layer_type, thumb_color, locked)
         self._update_style()
 
@@ -2795,8 +2965,20 @@ class LayerRow(QWidget):
             f"LayerRow:hover{{background:{'#1d3870' if self._active else '#2a2a2a'};}}"
         )
 
-    def mousePressEvent(self, _event) -> None:       # noqa: N802
-        self.selected.emit(self._index)
+    def _show_context_menu(self, pos: QPointF) -> None:
+        if not self._layer_id:
+            return
+        menu = QMenu(self)
+        menu.setStyleSheet(_panel_menu_style())
+        delete_action = menu.addAction("删除图层")
+        action = menu.exec(self.mapToGlobal(pos.toPoint() if hasattr(pos, "toPoint") else pos))
+        if action == delete_action:
+            self.delete_requested.emit(self._layer_id)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:       # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.selected.emit(self._index)
+        super().mousePressEvent(event)
 
 
 # ── Adjustment-panel helpers ────────────────────────────────────────────────
@@ -2894,6 +3076,8 @@ class GradientSlider(QWidget):
         self._value = value
         self._dragging = False
         self.setFixedHeight(28)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def value(self) -> int:
@@ -3564,10 +3748,12 @@ class ThinSlider(QWidget):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         if self._orientation == Qt.Orientation.Horizontal:
             self.setFixedHeight(24)
-            self.setMinimumWidth(60)
+            self.setMinimumWidth(0)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         else:
             self.setFixedWidth(22)
             self.setMinimumHeight(188)
+            self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
 
     def value(self) -> int:
         return self._value
@@ -3791,7 +3977,7 @@ class ColorEditorPreviewStrip(QWidget):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class RightPanel(QWidget):
-    """320 px right panel: panel tabs + layers content."""
+    """Responsive right panel: panel tabs + layers content."""
 
     active_layer_changed = pyqtSignal(int)
     layer_visibility_changed = pyqtSignal(int, bool)
@@ -3804,11 +3990,16 @@ class RightPanel(QWidget):
     mask_adjust_section_changed = pyqtSignal(str, dict)
     mask_adjust_section_change_finished = pyqtSignal(str, dict, str)
     mask_layer_selected = pyqtSignal(str)
+    malayer_delete_requested = pyqtSignal(str)
     tool_requested = pyqtSignal(str)
+    portrait_mask_requested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedWidth(320)
+        layout_tokens = editor_right_panel_layout_tokens()
+        self.setMinimumWidth(int(layout_tokens["min_width"]))
+        self.setMaximumWidth(int(layout_tokens["max_width"]))
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self.setStyleSheet(
             f"background:{C_BG_RIGHT}; border-left:1px solid {C_BORDER_P};"
         )
@@ -3860,6 +4051,8 @@ class RightPanel(QWidget):
         self._active_mask_layer_id: Optional[str] = None
         self._mask_layer_list_lo: Optional[QVBoxLayout] = None
         self._mask_layer_buttons: dict[str, QPushButton] = {}
+        self._portrait_mask_button: Optional[QPushButton] = None
+        self._portrait_mask_progress_label: Optional[CircularProgressLabel] = None
         self._build()
 
     def _build(self) -> None:
@@ -4097,10 +4290,19 @@ class RightPanel(QWidget):
         for idx in reversed(range(len(malayers))):
             malayer = malayers[idx]
             layer_type = getattr(malayer, "tab_id", getattr(malayer, "type_name", "layer"))
-            row = LayerRow(idx, malayer.name, layer_type, "#404040", idx == top_layer_index, malayer.locked)
+            row = LayerRow(
+                idx,
+                malayer.name,
+                layer_type,
+                "#404040",
+                idx == top_layer_index,
+                malayer.locked,
+                layer_id=str(getattr(malayer, "id", "")),
+            )
             row._eye_btn.setChecked(malayer.visible)
             row.selected.connect(self._on_layer_selected)
             row.visibility_toggled.connect(self._on_layer_visibility)
+            row.delete_requested.connect(self.malayer_delete_requested.emit)
             self._layer_rows.append(row)
             self._layer_list_lo.addWidget(row)
         self._layer_list_lo.addStretch()
@@ -4147,6 +4349,10 @@ class RightPanel(QWidget):
             button = self._build_mask_layer_button(layer)
             button.setChecked(layer_id == self._active_mask_layer_id)
             button.clicked.connect(lambda _=False, current_id=layer_id: self._on_mask_layer_selected(current_id))
+            button.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            button.customContextMenuRequested.connect(
+                lambda pos, b=button, current_id=layer_id: self._show_mask_layer_context_menu(b, current_id, pos)
+            )
             self._mask_layer_buttons[layer_id] = button
             self._mask_layer_list_lo.addWidget(button)
 
@@ -4169,6 +4375,16 @@ class RightPanel(QWidget):
             f"QPushButton:checked{{background:{C_BG_ACTIVE}; color:{C_PRIMARY_H}; border-color:{C_PRIMARY};}}"
         )
         return button
+
+    def _show_mask_layer_context_menu(self, button: QPushButton, layer_id: str, pos: QPointF) -> None:
+        if not layer_id:
+            return
+        menu = QMenu(button)
+        menu.setStyleSheet(_panel_menu_style())
+        delete_action = menu.addAction("删除蒙版")
+        action = menu.exec(button.mapToGlobal(pos.toPoint() if hasattr(pos, "toPoint") else pos))
+        if action == delete_action:
+            self.malayer_delete_requested.emit(layer_id)
 
     def _on_mask_layer_selected(self, layer_id: str) -> None:
         self._active_mask_layer_id = layer_id
@@ -4404,13 +4620,13 @@ class RightPanel(QWidget):
         lbl.setWordWrap(True)
         return lbl
 
-    def _build_mask_tool_button(self, text: str, *, active: bool = False) -> QPushButton:
+    def _build_mask_tool_button(self, text: str, *, active: bool = False, compact: bool = False) -> QPushButton:
         btn = QPushButton(text)
         btn.setCheckable(True)
         btn.setChecked(active)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn.setFixedSize(58, 52)
+        btn.setFixedSize(66 if compact else 54, 52)
         btn.setStyleSheet(
             f"QPushButton{{background:{C_BG_RIGHT}; color:{C_TEXT_3};"
             f"border:1px solid {C_BORDER}; border-radius:8px; font-size:10px;"
@@ -4419,6 +4635,11 @@ class RightPanel(QWidget):
             f"QPushButton:checked{{background:{C_BG_ACTIVE}; color:{C_PRIMARY_H};"
             f"border:1px solid {C_PRIMARY};}}"
         )
+        if compact:
+            progress = CircularProgressLabel(btn)
+            progress.move(6, 6)
+            progress.hide()
+            self._portrait_mask_progress_label = progress
         return btn
 
     def _build_mask_chip(self, text: str, *, active: bool = False) -> QPushButton:
@@ -4480,6 +4701,7 @@ class RightPanel(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         scroll.setStyleSheet(
             f"QScrollArea{{background:transparent; border:none;}}"
             f"QScrollBar:vertical{{background:transparent; width:8px; margin:8px 0;}}"
@@ -4489,30 +4711,36 @@ class RightPanel(QWidget):
         )
 
         body = QWidget()
+        body.setMinimumWidth(0)
+        body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         body.setStyleSheet("background:transparent;")
         lo = QVBoxLayout(body)
-        lo.setContentsMargins(14, 14, 14, 16)
+        lo.setContentsMargins(12, 14, 12, 16)
         lo.setSpacing(12)
 
         lo.addWidget(self._mask_title("Mask Tools"))
         lo.addWidget(self._mask_subtitle("Create linear or radial gradient masks by choosing a tool and dragging on the canvas."))
 
         tools = QWidget()
+        tools.setMinimumWidth(0)
+        tools.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         tools_lo = QHBoxLayout(tools)
         tools_lo.setContentsMargins(0, 0, 0, 0)
-        tools_lo.setSpacing(8)
-        tool_defs = (
-            ("linear", "Linear", "mask-linear", True),
-            ("radial", "Radial", "mask-radial", True),
-            ("brush", "Brush", "paintbrush", False),
-            ("ai", "AI", "wand-2", False),
-        )
-        for key, text, tool_name, enabled in tool_defs:
-            btn = self._build_mask_tool_button(text, active=False)
+        tools_lo.setSpacing(6)
+        for tool in editor_mask_tool_definitions():
+            key = str(tool["key"])
+            text = str(tool["label"])
+            tool_name = str(tool["tool_name"])
+            enabled = bool(tool["enabled"])
+            mode = str(tool["mode"])
+            btn = self._build_mask_tool_button(text, active=False, compact=(key == "portrait"))
             btn.setEnabled(enabled)
             btn.setToolTip("Reserved for a later phase" if not enabled else "Drag on the canvas to create")
-            if enabled:
+            if enabled and mode == "drag":
                 btn.clicked.connect(lambda _=False, k=key, t=tool_name: self._select_mask_tool(k, t))
+            elif enabled and key == "portrait":
+                btn.clicked.connect(self.portrait_mask_requested.emit)
+                self._portrait_mask_button = btn
             self._mask_tool_buttons[key] = btn
             tools_lo.addWidget(btn)
         lo.addWidget(tools)
@@ -4598,7 +4826,7 @@ class RightPanel(QWidget):
         example_lbl = _lbl(example, C_TEXT_4, 10)
         example_lbl.setWordWrap(True)
         note_lo.addWidget(example_lbl)
-        note_lo.addWidget(_lbl("Brush and AI mask entries are reserved for future phases.", C_TEXT_4, 10))
+        note_lo.addWidget(_lbl("人像蒙版将通过 MODNet 生成人像 alpha 蒙版，并作为普通蒙版图层加入列表。", C_TEXT_4, 10))
         lo.addWidget(note_box)
 
         lo.addStretch()
@@ -4634,6 +4862,20 @@ class RightPanel(QWidget):
         for button_key, button in self._mask_tool_buttons.items():
             button.setChecked(button_key == key)
         self.tool_requested.emit(tool_name)
+
+    def set_portrait_mask_progress(self, value: int, *, busy: bool) -> None:
+        button = self._portrait_mask_button
+        progress = self._portrait_mask_progress_label
+        if button is None or progress is None:
+            return
+        button.setEnabled(not busy)
+        button.setText("生成人像中" if busy else "人像蒙版")
+        if busy:
+            progress.show()
+            progress.set_value(value)
+        else:
+            progress.hide()
+            progress.set_value(0)
 
     def _mask_type_label(self, mask_state: dict[str, Any]) -> str:
         mask_type = str(mask_state.get("type", mask_state.get("mask_type", ""))).lower()
@@ -4954,6 +5196,8 @@ class RightPanel(QWidget):
     ) -> None:
         """Append a labelled GradientSlider row to *lo*."""
         row = QWidget()
+        row.setMinimumWidth(0)
+        row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         row.setStyleSheet("background:transparent;")
         row_lo = QVBoxLayout(row)
         row_lo.setContentsMargins(0, 0, 0, 0)
@@ -4961,6 +5205,8 @@ class RightPanel(QWidget):
 
         # label + current value
         top = QWidget()
+        top.setMinimumWidth(0)
+        top.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         top.setStyleSheet("background:transparent;")
         top_lo = QHBoxLayout(top)
         top_lo.setContentsMargins(0, 0, 0, 0)
@@ -4972,6 +5218,7 @@ class RightPanel(QWidget):
         row_lo.addWidget(top)
 
         slider = GradientSlider(left_color, right_color, min_val, max_val, value)
+        slider.setMinimumWidth(0)
         slider.value_changed.connect(lambda v, lb=val_lbl: lb.setText(str(v)))
         row_lo.addWidget(slider)
 
@@ -5003,12 +5250,16 @@ class RightPanel(QWidget):
         on_change: Optional[Callable[[int], None]] = None,
     ) -> ThinSlider:
         row = QWidget()
+        row.setMinimumWidth(0)
+        row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         row.setStyleSheet("background:transparent;")
         row_lo = QVBoxLayout(row)
         row_lo.setContentsMargins(0, 0, 0, 0)
         row_lo.setSpacing(4)
 
         top = QWidget()
+        top.setMinimumWidth(0)
+        top.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         top_lo = QHBoxLayout(top)
         top_lo.setContentsMargins(0, 0, 0, 0)
         top_lo.setSpacing(0)
@@ -5019,6 +5270,7 @@ class RightPanel(QWidget):
         row_lo.addWidget(top)
 
         slider = ThinSlider(Qt.Orientation.Horizontal, min_val, max_val, value)
+        slider.setMinimumWidth(0)
         slider.value_changed.connect(lambda v, lb=value_label: lb.setText(str(v)))
         if on_change is not None:
             slider.value_changed.connect(on_change)
@@ -5150,6 +5402,7 @@ class RightPanel(QWidget):
 
     def _build_color_editor_content(self, lo: QVBoxLayout) -> None:
         scope = self._adjust_build_scope
+        layout_tokens = editor_right_panel_layout_tokens()
         pick_button = QPushButton("用吸管在照片中吸取颜色")
         pick_button.setIcon(_qicon("eyedropper", 14, C_TEXT_2))
         pick_button.setIconSize(QSize(14, 14))
@@ -5167,11 +5420,18 @@ class RightPanel(QWidget):
         lo.addSpacing(6)
 
         wheel_row = QWidget()
+        wheel_row.setMinimumWidth(0)
+        wheel_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         wheel_lo = QHBoxLayout(wheel_row)
         wheel_lo.setContentsMargins(0, 0, 0, 0)
-        wheel_lo.setSpacing(12)
+        wheel_lo.setSpacing(8 if scope == "mask" else 12)
 
-        self._color_editor_wheel = ColorEditorWheelWidget(size=258)
+        wheel_size = (
+            int(layout_tokens["mask_color_wheel_size"])
+            if scope == "mask"
+            else int(layout_tokens["adjust_color_wheel_size"])
+        )
+        self._color_editor_wheel = ColorEditorWheelWidget(size=wheel_size)
         self._color_editor_wheels[scope] = self._color_editor_wheel
         self._color_editor_wheel.color_changed.connect(
             lambda hue, sat, current_scope=scope: self._emit_color_editor_wheel_change(hue, sat, committed=False, scope=current_scope)
@@ -5179,7 +5439,7 @@ class RightPanel(QWidget):
         self._color_editor_wheel.color_change_finished.connect(
             lambda hue, sat, current_scope=scope: self._emit_color_editor_wheel_change(hue, sat, committed=True, scope=current_scope)
         )
-        wheel_lo.addWidget(self._color_editor_wheel, 1)
+        wheel_lo.addWidget(self._color_editor_wheel, 0)
 
         lightness_col = QWidget()
         lightness_lo = QVBoxLayout(lightness_col)
@@ -5210,10 +5470,14 @@ class RightPanel(QWidget):
         lo.addWidget(wheel_row)
 
         self._color_editor_preview = ColorEditorPreviewStrip()
+        self._color_editor_preview.setMinimumWidth(0)
+        self._color_editor_preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._color_editor_previews[scope] = self._color_editor_preview
         lo.addWidget(self._color_editor_preview)
 
         hsl_row = QWidget()
+        hsl_row.setMinimumWidth(0)
+        hsl_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         hsl_lo = QHBoxLayout(hsl_row)
         hsl_lo.setContentsMargins(0, 0, 0, 0)
         hsl_lo.setSpacing(0)
@@ -5227,6 +5491,8 @@ class RightPanel(QWidget):
         lo.addWidget(hsl_row)
 
         pair_row = QWidget()
+        pair_row.setMinimumWidth(0)
+        pair_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         pair_lo = QHBoxLayout(pair_row)
         pair_lo.setContentsMargins(0, 4, 0, 0)
         pair_lo.setSpacing(8)
@@ -5904,6 +6170,9 @@ class MainEditorWindow(QWidget):
         self._image_open_thread: Optional[QThread] = None
         self._image_open_worker: Optional[ImageOpenWorker] = None
         self._pending_image_open_path = ""
+        self._portrait_mask_thread: Optional[QThread] = None
+        self._portrait_mask_worker: Optional[PortraitMaskWorker] = None
+        self._pending_portrait_mask_error: Optional[str] = None
         self._export_thread: Optional[QThread] = None
         self._export_worker: Optional[ExportWorker] = None
         self._export_progress_dialog: Optional[ExportProgressDialog] = None
@@ -6047,6 +6316,8 @@ class MainEditorWindow(QWidget):
         self._right_panel.mask_adjust_section_changed.connect(self._on_mask_adjust_section_changed)
         self._right_panel.mask_adjust_section_change_finished.connect(self._on_mask_adjust_section_change_finished)
         self._right_panel.mask_layer_selected.connect(self._on_mask_layer_selected)
+        self._right_panel.malayer_delete_requested.connect(self._on_malayer_delete_requested)
+        self._right_panel.portrait_mask_requested.connect(self._generate_portrait_mask)
 
     def _hide_ai_chat_column(self) -> None:
         self._ai_chatbox.hide()
@@ -6380,6 +6651,79 @@ class MainEditorWindow(QWidget):
         return self._pil_to_pixmap(
             tl_image.render_image(preview=preview, max_dimension=self._preview_max_dimension() if preview else None)
         )
+
+    def _portrait_mask_model_path(self) -> Path:
+        return Path(__file__).resolve().parents[3] / "models" / "modnet_photographic.onnx"
+
+    def _portrait_mask_output_dir(self) -> Path:
+        return Path(__file__).resolve().parents[3] / "tmp" / "portrait_masks"
+
+    def _generate_portrait_mask(self) -> None:
+        if self._current_tlimage is None or self._portrait_mask_thread is not None:
+            return
+        source_path = str(Path(self._current_tlimage.image_path).expanduser())
+        model_path = self._portrait_mask_model_path()
+        if not Path(source_path).is_file():
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Portrait Mask Failed", "当前图片源文件不存在，无法生成人像蒙版。")
+            return
+        self._pending_portrait_mask_error = None
+        self._right_panel.set_portrait_mask_progress(0, busy=True)
+        self._portrait_mask_thread = QThread(self)
+        self._portrait_mask_worker = PortraitMaskWorker(
+            source_path,
+            str(model_path),
+            str(self._portrait_mask_output_dir()),
+        )
+        self._portrait_mask_worker.moveToThread(self._portrait_mask_thread)
+        self._portrait_mask_thread.started.connect(self._portrait_mask_worker.run)
+        self._portrait_mask_worker.progress_changed.connect(self._on_portrait_mask_progress)
+        self._portrait_mask_worker.finished.connect(self._on_portrait_mask_finished)
+        self._portrait_mask_worker.failed.connect(self._on_portrait_mask_failed)
+        self._portrait_mask_worker.finished.connect(self._portrait_mask_thread.quit)
+        self._portrait_mask_worker.failed.connect(self._portrait_mask_thread.quit)
+        self._portrait_mask_worker.finished.connect(self._portrait_mask_worker.deleteLater)
+        self._portrait_mask_worker.failed.connect(self._portrait_mask_worker.deleteLater)
+        self._portrait_mask_thread.finished.connect(self._cleanup_portrait_mask_worker)
+        self._portrait_mask_thread.finished.connect(self._portrait_mask_thread.deleteLater)
+        self._portrait_mask_thread.start()
+
+    def _on_portrait_mask_progress(self, value: int) -> None:
+        self._right_panel.set_portrait_mask_progress(value, busy=True)
+
+    def _on_portrait_mask_finished(self, result: object) -> None:
+        if self._current_tlimage is None or not isinstance(result, PortraitMaskResult):
+            return
+        layer = self._current_tlimage.add_mask_layer(
+            result.mask_values,
+            name="人像蒙版",
+            record_history=True,
+            description="人像蒙版 · 新建",
+        )
+        self._active_mask_layer_id = layer.id
+        mask_state = layer.mask.to_dict() if layer.mask else {}
+        self._right_panel.set_malayers(self._current_tlimage.malayers)
+        self._right_panel.set_mask_layers(self._mask_layers(), self._active_mask_layer_id)
+        self._right_panel.set_mask_state(mask_state)
+        self._right_panel.set_mask_adjust_state(layer.to_dict().get("payload", {}))
+        self._canvas.set_mask_overlay(mask_state)
+        self._canvas.set_mask_overlay_visible(True)
+        self._schedule_preview_refresh(immediate=True)
+        self._request_histogram_refresh(immediate=True)
+        self._right_panel.set_history_entries(self._current_tlimage.history_entries())
+        self._persist_current_library_edit_state()
+
+    def _on_portrait_mask_failed(self, error_message: str) -> None:
+        self._pending_portrait_mask_error = error_message
+
+    def _cleanup_portrait_mask_worker(self) -> None:
+        self._right_panel.set_portrait_mask_progress(0, busy=False)
+        self._portrait_mask_worker = None
+        self._portrait_mask_thread = None
+        if self._pending_portrait_mask_error:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Portrait Mask Failed", self._pending_portrait_mask_error)
+            self._pending_portrait_mask_error = None
 
     def _apply_preview_to_canvas(self, *, reset_view: bool = False) -> None:
         if self._current_tlimage is None:
@@ -6737,6 +7081,26 @@ class MainEditorWindow(QWidget):
         self._canvas.set_mask_overlay(mask_state)
         self._canvas.set_mask_overlay_visible(True)
 
+    def _on_malayer_delete_requested(self, layer_id: str) -> None:
+        if self._current_tlimage is None or not layer_id:
+            return
+        layer = self._current_tlimage.get_malayer(layer_id)
+        if layer is None:
+            return
+        layer_name = str(getattr(layer, "name", "") or "图层")
+        is_mask_layer = getattr(layer, "type_name", "") == "mask"
+        try:
+            self._current_tlimage.remove_malayer(layer_id)
+        except KeyError:
+            return
+        if self._active_mask_layer_id == layer_id:
+            self._active_mask_layer_id = None
+        self._current_tlimage.commit_history(
+            f"删除{'蒙版' if is_mask_layer else '图层'} · {layer_name}"
+        )
+        self._refresh_canvas_from_tlimage(sync_panel=True)
+        self._persist_current_library_edit_state()
+
     def _on_adjust_section_changed(self, section: str, values: dict) -> None:
         if self._current_tlimage is None:
             return
@@ -6871,7 +7235,7 @@ class MainEditorWindow(QWidget):
         self._canvas.set_mask_overlay_visible(False)
         mask = getattr(layer, "mask", None)
         mask_state = mask.to_dict() if mask else None
-        self._current_tlimage.update_mask_layer(
+        updated_layer = self._current_tlimage.update_mask_layer(
             layer.id,
             mask_state,
             adjustment={section: values},
@@ -6879,6 +7243,8 @@ class MainEditorWindow(QWidget):
             record_history=True,
             description=f"蒙版调色 · {description}",
         )
+        if updated_layer is not None:
+            layer = updated_layer
         self._right_panel.set_mask_adjust_state(layer.to_dict().get("payload", {}))
         self._schedule_preview_refresh(immediate=True)
         self._request_histogram_refresh(immediate=True)
@@ -7155,6 +7521,9 @@ class MainEditorWindow(QWidget):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         if self._image_open_thread is not None:
+            event.ignore()
+            return
+        if self._portrait_mask_thread is not None:
             event.ignore()
             return
         if self._export_thread is not None:

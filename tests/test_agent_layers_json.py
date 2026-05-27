@@ -252,3 +252,83 @@ def test_sky_linear_mask_agent_payload_creates_local_sky_adjustment(tmp_path):
     assert layer.params.hsl.blue.saturation == 24
     assert layer.params.tone.exposure == 0
     assert layer.params.tone.brightness == 0
+
+
+def test_preview_mask_layer_adjustment_persists_into_render_pipeline_for_image_masks(tmp_path):
+    image_path = tmp_path / "base.png"
+    mask_path = tmp_path / "mask.png"
+    _write_base_image(image_path, color=(96, 96, 96, 255))
+    Image.new("L", (24, 24), 255).save(mask_path)
+
+    tl_image = TLImage.open(str(image_path))
+    layer = tl_image.add_mask_layer(
+        {
+            "type": "image",
+            "name": "Portrait Mask",
+            "image_path": str(mask_path),
+            "opacity": 1.0,
+            "invert": False,
+        }
+    )
+
+    before = tl_image.render_image()
+    tl_image.preview_mask_layer_adjustment(layer.id, "tone", {"brightness": 80})
+    after = tl_image.render_image()
+
+    assert before.tobytes() != after.tobytes()
+    layer_state = next(
+        item for item in tl_image.edit_state["layers"]
+        if item.get("id") == layer.id
+    )
+    assert layer_state["payload"]["tone"]["brightness"] == 80
+
+
+def test_preview_mask_layer_exposure_survives_layer_rebuild_for_image_masks(tmp_path):
+    image_path = tmp_path / "base.png"
+    mask_path = tmp_path / "mask.png"
+    _write_base_image(image_path, color=(96, 96, 96, 255))
+    Image.new("L", (24, 24), 255).save(mask_path)
+
+    tl_image = TLImage.open(str(image_path))
+    layer = tl_image.add_mask_layer(
+        {
+            "type": "image",
+            "name": "Portrait Mask",
+            "image_path": str(mask_path),
+            "opacity": 1.0,
+            "invert": False,
+        }
+    )
+
+    before = tl_image.render_image()
+    tl_image.preview_mask_layer_adjustment(layer.id, "tone", {"exposure": 1.0})
+    after = tl_image.render_image()
+    rebuilt_layer = tl_image.get_malayer(layer.id)
+
+    assert rebuilt_layer.params.tone.exposure == 1.0
+    assert before.tobytes() != after.tobytes()
+
+
+def test_remove_mask_layer_removes_bound_adjustment_payload(tmp_path):
+    image_path = tmp_path / "base.png"
+    mask_path = tmp_path / "mask.png"
+    _write_base_image(image_path, color=(96, 96, 96, 255))
+    Image.new("L", (24, 24), 255).save(mask_path)
+
+    tl_image = TLImage.open(str(image_path))
+    layer = tl_image.add_mask_layer(
+        {
+            "type": "image",
+            "name": "Portrait Mask",
+            "image_path": str(mask_path),
+            "opacity": 1.0,
+            "invert": False,
+        },
+        adjustment={"tone": {"brightness": 80}},
+    )
+
+    removed = tl_image.remove_malayer(layer.id)
+
+    assert removed.id == layer.id
+    assert tl_image.get_malayer(layer.id) is None
+    assert all(item.get("id") != layer.id for item in tl_image.edit_state.get("layers", []))

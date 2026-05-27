@@ -1657,11 +1657,19 @@ class MaskMalayer(AdjustmentMalayer):
         white_balance_payload = raw_payload.get("white_balance", raw_payload.get("whiteBalance", {}))
         color_editor_payload = raw_payload.get("color_editor", raw_payload.get("colorEditor", {}))
         color_grading_payload = raw_payload.get("color_grading", raw_payload.get("colorGrading", {}))
+        tone_payload = dict(raw_payload.get("tone", {}))
+        for key in ("exposure", "contrast"):
+            if key not in tone_payload and key in basic_payload:
+                tone_payload[key] = basic_payload[key]
+        hsl_payload = dict(hsl_payload)
+        for key in ("hue", "saturation", "vibrance"):
+            if key not in hsl_payload and key in basic_payload:
+                hsl_payload[key] = basic_payload[key]
         return AdjustmentParams(
             basic=BasicAdjustParams(**basic_payload),
             white_balance=WhiteBalanceParams(**white_balance_payload),
             geometry=GeometryParams(**raw_payload.get("geometry", {})),
-            tone=ToneParams(**raw_payload.get("tone", {})),
+            tone=ToneParams(**tone_payload),
             curves=CurveParams(
                 rgb_curve=[CurvePoint(**item) for item in curves_payload.get("rgb_curve", curves_payload.get("rgbCurve", [{"x": 0, "y": 0}, {"x": 255, "y": 255}]))],
                 luminosity_curve=[CurvePoint(**item) for item in curves_payload.get("luminosity_curve", curves_payload.get("luminosityCurve", [{"x": 0, "y": 0}, {"x": 255, "y": 255}]))],
@@ -1670,9 +1678,9 @@ class MaskMalayer(AdjustmentMalayer):
                 blue_curve=[CurvePoint(**item) for item in curves_payload.get("blue_curve", curves_payload.get("blueCurve", [{"x": 0, "y": 0}, {"x": 255, "y": 255}]))],
             ),
             hsl=HSLParams(
-                hue=hsl_payload.get("hue", basic_payload.get("hue", 0)),
-                saturation=hsl_payload.get("saturation", basic_payload.get("saturation", 0)),
-                vibrance=hsl_payload.get("vibrance", basic_payload.get("vibrance", 0)),
+                hue=hsl_payload.get("hue", 0),
+                saturation=hsl_payload.get("saturation", 0),
+                vibrance=hsl_payload.get("vibrance", 0),
                 red=HSLColorParams(**hsl_payload.get("red", {})),
                 orange=HSLColorParams(**hsl_payload.get("orange", {})),
                 yellow=HSLColorParams(**hsl_payload.get("yellow", {})),
@@ -1711,7 +1719,7 @@ class MaskMalayer(AdjustmentMalayer):
     @classmethod
     def _from_dict(cls, data: Dict[str, Any]) -> "MaskMalayer":
         payload = data.get("payload", {})
-        return cls(
+        layer = cls(
             name=data.get("name", "Mask"),
             params=cls._params_from_payload(payload if isinstance(payload, dict) else {}),
             visible=data.get("visible", True),
@@ -1722,6 +1730,9 @@ class MaskMalayer(AdjustmentMalayer):
             tab_id=data.get("tab_id"),
             layer_id=data.get("id"),
         )
+        if isinstance(payload, dict):
+            layer.params = cls._params_from_payload(payload)
+        return layer
 
 
 class FilterMalayer(TabMalayer):

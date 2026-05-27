@@ -7,6 +7,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from tempusloom.ui.editor_window import editor_side_panel_order
 from tempusloom.ui.editor_window import editor_section_boundary_tokens
 from tempusloom.ui.editor_window import editor_adjust_section_chrome
+from tempusloom.ui.editor_window import editor_mask_tool_definitions
+from tempusloom.ui.editor_window import editor_right_panel_layout_tokens
 from tempusloom.ui.editor_window import editor_tool_shortcuts
 from tempusloom.ui.editor_window import editor_tool_sidebar_chrome
 from tempusloom.ui.editor_window import editor_tool_sidebar_tools
@@ -57,3 +59,20 @@ def test_editor_tool_sidebar_has_right_boundary_line():
     chrome = editor_tool_sidebar_chrome()
 
     assert chrome["border_right"] == "1px solid #2d2d2d"
+
+
+def test_mask_tools_expose_portrait_mask_instead_of_brush():
+    tools = editor_mask_tool_definitions()
+
+    assert [tool["key"] for tool in tools] == ["linear", "radial", "portrait", "ai"]
+    assert tools[2]["label"] == "人像蒙版"
+    assert tools[2]["mode"] == "action"
+    assert all(tool["key"] != "brush" for tool in tools)
+
+
+def test_right_panel_uses_responsive_mask_adjustment_widths():
+    tokens = editor_right_panel_layout_tokens()
+
+    assert tokens["fixed_width"] is False
+    assert tokens["horizontal_scroll"] is False
+    assert tokens["mask_color_wheel_size"] < tokens["adjust_color_wheel_size"]

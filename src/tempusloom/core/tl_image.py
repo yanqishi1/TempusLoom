@@ -768,7 +768,9 @@ class TLImage:
         if layer is None:
             return None
         self._apply_adjust_delta(layer, self._normalize_adjust_payload({section: values}))
-        self._sync_single_layer_state(layer)
+        # Preview renders rebuild malayers from edit_state, so the previewed mask
+        # adjustment must be flushed back to the serialized layer stack.
+        self._sync_state_from_malayers()
         return layer
 
     def get_primary_mask_layer(self) -> Optional[MaskMalayer]:
